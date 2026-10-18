@@ -22,7 +22,15 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm test
-      - run: npm run build
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # این تست‌ها خودشان با APP_BASE=/ می‌سازند و dist را بازنویسی می‌کنند؛
+      # پس باید پیش از ساخت نسخهٔ Pages اجرا شوند، وگرنه خروجی آپلودشده
+      # نسخهٔ ریشهٔ دامنه می‌شود و Pages خراب می‌شود.
+      - name: PWA and offline tests
+        run: npx playwright test
+      - name: Build for GitHub Pages
+        run: npm run build
       - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
