@@ -107,11 +107,10 @@ export default function Onboarding() {
           </span>
           <strong className="text-2xl">همگام</strong>
         </div>
-        <p className="muted small mb-3">شروعی ساده، در سه قدم</p>
-        <div
-          className="flex gap-2 mb-8"
-          aria-label={`مرحله ${formatNumber(step + 1, settings)} از ۳`}
-        >
+        <p className="muted small mb-3" role="status">
+          {`شروعی ساده، در سه قدم — مرحلهٔ ${formatNumber(step + 1, settings)} از ۳`}
+        </p>
+        <div className="flex gap-2 mb-8" aria-hidden="true">
           {[0, 1, 2].map((i) => (
             <div
               className={`h-1.5 flex-1 rounded-full ${i <= step ? 'bg-[var(--primary)]' : 'bg-[var(--line)]'}`}

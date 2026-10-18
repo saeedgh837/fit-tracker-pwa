@@ -2,12 +2,14 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { preloadFirstPaintFonts } from './scripts/vitePluginPreloadFonts';
 
 export default defineConfig({
   base: '/fit-tracker-pwa/',
   plugins: [
     react(),
     tailwindcss(),
+    preloadFirstPaintFonts(),
     VitePWA({
       registerType: 'prompt',
       includeAssets: ['icons/*.png', 'favicon.svg'],
@@ -49,19 +51,4 @@ export default defineConfig({
       devOptions: { enabled: false },
     }),
   ],
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes('recharts') || id.includes('d3-')) return 'charts';
-          if (
-            id.includes('framer-motion') ||
-            id.includes('motion-dom') ||
-            id.includes('motion-utils')
-          )
-            return 'motion';
-        },
-      },
-    },
-  },
 });
