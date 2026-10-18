@@ -1,0 +1,9 @@
+# Execution ledger
+Plan: docs/superpowers/plans/2026-10-18-fit-tracker.md
+
+- User explicitly requested no questions and complete autonomous delivery, including commits/publication. No interactive planning gate used.
+- Architecture consultation completed. Adopted stable canonical local day keys, snapshot habit history, atomic bounded backup validation, no forced PWA update; document same-origin Pages privacy limitation and unencrypted backups.
+- Ruling: fresh empty project is isolated; use feature branch here, not a new worktree. Agent worktree startup unavailable; team agents launched in supported background mode and instructed absolute main paths.
+- Team domains: habits+weight/journal and diet+exercise. Manager owns shared contracts, persistence, onboarding/dashboard/reports/settings/PWA/deploy/docs.
+- Contract frozen in docs/CONTRACT.md; types in src/db/types.ts. Feature workers cannot modify shared files or git.
+- RED tests written for core calculations/date/unit/history and DB concurrency/import validation; pending dependency installation before initial execution.
