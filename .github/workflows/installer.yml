@@ -1,0 +1,120 @@
+name: Test the Ubuntu installer
+
+# اجرای واقعی نصب‌کننده روی یک رانر تازهٔ Ubuntu. این تنها راهی است که می‌شود
+# مطمئن شد مراحل apt، nginx، استقرار اتمیک و تست سلامت واقعاً کار می‌کنند؛
+# تست واحد bash چنین چیزی را اثبات نمی‌کند.
+#
+# حالت‌های اجرا:
+#   HTTP  — نصب کامل بدون TLS (چون دامنهٔ واقعی وجود ندارد)
+#   reinstall — اجرای دوباره روی همان نصب، برای اثبات idempotent بودن
+#   rollback  — بازگردانی به نسخهٔ پیشین
+#
+# دستی از تب Actions اجرا شود؛ روی push اجرا نمی‌شود چون هر اجرا یک سرور
+# کامل و صدها مگابایت بسته می‌خواهد.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'کدام مسیر را تست کنیم'
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - full-and-reinstall
+          - update-and-rollback
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    # یک رانر با اختیارات کامل تا apt و systemctl واقعی کار کنند.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show environment
+        run: |
+          . /etc/os-release
+          echo "os: $PRETTY_NAME"
+          echo "systemd: $(systemctl --version | head -1)"
+          echo "pid1: $(ps -p 1 -o comm=)"
+          free -m | head -2
+          df -h / | tail -1
+
+      - name: Unit tests for the installer
+        run: bash deploy/install.test.sh
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -s bash deploy/install.sh deploy/install.test.sh
+
+      - name: Install (HTTP only, real apt + nginx)
+        run: |
+          sudo bash deploy/install.sh \
+            --non-interactive --yes \
+            --domain hamgam.test \
+            --email ci@example.com \
+            --source local \
+            --webroot /var/www/hamgam \
+            --skip-tls
+
+      - name: Verify the live site over HTTP
+        run: |
+          set -e
+          curl -sS -o /dev/null -w 'HTTP %{http_code}\n' --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/
+          curl -sS --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/ | grep -q 'id="root"'
+          echo "index.html served"
+          curl -sSI --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/sw.js | grep -i 'cache-control'
+          curl -sSI --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/manifest.webmanifest | grep -i 'content-type'
+          echo "=== release layout ==="
+          ls -la /var/www/hamgam/
+          readlink -f /var/www/hamgam/current
+          test -L /var/www/hamgam/current
+          echo "=== nginx config accepted ==="
+          sudo nginx -t
+
+      - name: Re-run must be idempotent
+        if: inputs.mode == 'full-and-reinstall' || inputs.mode == 'update-and-rollback'
+        run: |
+          sudo bash deploy/install.sh \
+            --non-interactive --yes \
+            --domain hamgam.test \
+            --email ci@example.com \
+            --source local \
+            --webroot /var/www/hamgam \
+            --skip-tls
+
+      - name: Update then roll back
+        if: inputs.mode == 'update-and-rollback'
+        run: |
+          set -e
+          before=$(readlink -f /var/www/hamgam/current)
+          echo "active before update: $before"
+          sudo bash deploy/install.sh --update --non-interactive --yes --skip-tls
+          after=$(readlink -f /var/www/hamgam/current)
+          echo "active after update: $after"
+          test "$after" != "$before" || { echo "update did not create a new release"; exit 1; }
+          sudo bash deploy/install.sh --rollback --non-interactive --yes
+          rolled=$(readlink -f /var/www/hamgam/current)
+          echo "active after rollback: $rolled"
+          test "$rolled" = "$before" || { echo "rollback did not restore the previous release"; exit 1; }
+
+      - name: The site survives a restart
+        run: |
+          sudo systemctl restart nginx
+          sleep 2
+          curl -sS -o /dev/null -w 'after restart: HTTP %{http_code}\n' \
+            --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/
+
+      - name: Show installer log
+        if: always()
+        run: |
+          echo "=== /var/log/hamgam-install.log (tail) ==="
+          sudo tail -80 /var/log/hamgam-install.log || true
+          echo "=== nginx error log ==="
+          sudo tail -40 /var/log/nginx/hamgam.error.log || true

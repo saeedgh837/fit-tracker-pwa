@@ -3,9 +3,19 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { preloadFirstPaintFonts } from './scripts/vitePluginPreloadFonts';
+/**
+ * Deployment root. GitHub Pages serves the app from /fit-tracker-pwa/, while a
+ * self-hosted nginx install serves it from / — set APP_BASE=/ when building for
+ * a domain root. Always normalised to a single leading and trailing slash.
+ */
+function normaliseBase(value = '/fit-tracker-pwa'): string {
+  const trimmed = value.trim().replace(/^\/+|\/+$/g, '');
+  return trimmed ? `/${trimmed}/` : '/';
+}
+const base = normaliseBase(process.env.APP_BASE);
 
 export default defineConfig({
-  base: '/fit-tracker-pwa/',
+  base,
   plugins: [
     react(),
     tailwindcss(),
@@ -14,14 +24,14 @@ export default defineConfig({
       registerType: 'prompt',
       includeAssets: ['icons/*.png', 'favicon.svg'],
       manifest: {
-        id: '/fit-tracker-pwa/',
+        id: base,
         name: 'همگام | سلامت روزانه',
         short_name: 'همگام',
         description: 'چک‌لیست روزانه، تغذیه و مسیر تندرستی، روی دستگاه شما',
         lang: 'fa',
         dir: 'rtl',
-        start_url: '/fit-tracker-pwa/',
-        scope: '/fit-tracker-pwa/',
+        start_url: base,
+        scope: base,
         display: 'standalone',
         orientation: 'any',
         theme_color: '#087f80',
