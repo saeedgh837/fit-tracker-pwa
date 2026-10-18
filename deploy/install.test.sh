@@ -254,6 +254,68 @@ mv "$VB/i5" "$VB/index.html"
 
 t 'validate_build: still accepts the restored build' '0' "$(vb_code "$VB")"
 
+# ------------------------------------------- load_saved_conf ----
+# باگ واقعی: در حالت --update فقط مسیرها از فایل تنظیمات بازگردانده می‌شدند و
+# OPT_SOURCE خالی می‌ماند، پس مرحلهٔ ساخت اجرا نمی‌شد و نصب با «پوشهٔ خروجی
+# ساخت پیدا نشد» می‌مرد. پس همهٔ کلیدها باید بازگردانده شوند.
+CONF_DIR_TEST="$TMP/conf"
+CONF_FILE_TEST="$CONF_DIR_TEST/install.conf"
+mkdir -p "$CONF_DIR_TEST"
+cat >"$CONF_FILE_TEST" <<'EOF'
+CFG_DOMAIN='fit.example.com'
+CFG_EMAIL='me@example.com'
+CFG_SOURCE='git'
+CFG_GIT_URL='https://github.com/saeedgh837/fit-tracker-pwa.git'
+CFG_GIT_REF='main'
+CFG_WEBROOT='/var/www/hamgam'
+CFG_REPO_DIR='/opt/hamgam'
+CFG_EXTRA_HOSTS='www.example.com'
+CFG_ENABLE_CSP='1'
+EOF
+
+# load_saved_conf را با مسیر تست بازنویسی می‌کنیم. همان پاک‌سازی نسخهٔ اصلی
+# هم اینجا لازم است: هر بار پیش از خواندن، مقادیر قبلی پاک می‌شوند تا کلید
+# غایب در فایل، مقدار کهنه را باقی نگذارد.
+load_saved_conf() {
+  [[ -r $CONF_FILE_TEST ]] || return 1
+  CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
+  # shellcheck disable=SC2034
+  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP=''
+  # shellcheck disable=SC1090
+  . "$CONF_FILE_TEST" || return 1
+  return 0
+}
+
+# شبیه‌سازی مسیر --update: هیچ مقدار خط فرمانی داده نشده است.
+OPT_DOMAIN='' OPT_EMAIL='' OPT_SOURCE='' OPT_GIT_URL='' OPT_GIT_REF=''
+OPT_WEBROOT='' OPT_REPO_DIR='' OPT_EXTRA_HOSTS=''
+UPDATE_ONLY=1 NON_INTERACTIVE=1 ROLLBACK_ONLY=0
+collect_config >/dev/null 2>&1
+t 'update: OPT_SOURCE restored from saved conf' 'git' "${OPT_SOURCE:-}"
+t 'update: OPT_GIT_REF restored' 'main' "${OPT_GIT_REF:-}"
+t 'update: OPT_EMAIL restored' 'me@example.com' "${OPT_EMAIL:-}"
+t 'update: OPT_DOMAIN restored' 'fit.example.com' "${OPT_DOMAIN:-}"
+t 'update: OPT_WEBROOT restored' '/var/www/hamgam' "${OPT_WEBROOT:-}"
+t 'update: OPT_REPO_DIR restored' '/opt/hamgam' "${OPT_REPO_DIR:-}"
+t 'update: OPT_EXTRA_HOSTS restored' 'www.example.com' "${OPT_EXTRA_HOSTS:-}"
+
+# مقدار صریح خط فرمان باید بر مقدار ذخیره‌شده اولویت داشته باشد.
+OPT_SOURCE='prebuilt' OPT_GIT_REF='v2'
+UPDATE_ONLY=1
+collect_config >/dev/null 2>&1
+t 'update: CLI --source wins over saved' 'prebuilt' "${OPT_SOURCE:-}"
+t 'update: CLI --git-ref wins over saved' 'v2' "${OPT_GIT_REF:-}"
+
+# فایل تنظیمات ناقص نباید باعث سقوط شود، باید پیام روشن بدهد.
+cat >"$CONF_FILE_TEST" <<'EOF'
+CFG_SOURCE='git'
+EOF
+OPT_DOMAIN='' OPT_SOURCE='' OPT_WEBROOT=''
+UPDATE_ONLY=1
+(collect_config >/dev/null 2>&1)
+t 'update: incomplete conf fails clearly' '1' "$?"
+UPDATE_ONLY=0
+
 # --------------------------------------------------------- نتیجه ----
 printf '\n──────────────────────────────\n'
 printf 'passed: %d\nfailed: %d\n' "$PASS" "$FAIL"

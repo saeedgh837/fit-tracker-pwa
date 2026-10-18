@@ -504,6 +504,11 @@ preflight() {
 # ------------------------------------------------------------ تنظیمات -------
 load_saved_conf() {
   [[ -r $CONF_FILE ]] || return 1
+  # مقادیر قبلی پاک می‌شوند تا اگر فایل تنظیمات کلیدی را نداشت، مقدار قدیمی
+  # باقی نماند و به‌جای خطای روشن، بی‌صدا با مقدار کهنه ادامه ندهیم.
+  # shellcheck disable=SC2034
+  CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
+  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP=''
   # shellcheck disable=SC1090
   . "$CONF_FILE" || return 1
   return 0
@@ -528,9 +533,25 @@ collect_config() {
   if [[ $UPDATE_ONLY -eq 1 || $ROLLBACK_ONLY -eq 1 ]]; then
     load_saved_conf || die "نصب قبلی پیدا نشد ($CONF_FILE). بدون --update/--rollback دوباره اجرا کنید."
     ok "تنظیمات نصب قبلی خوانده شد: $CFG_DOMAIN"
+    # همهٔ مقادیر ذخیره‌شده بازگردانده می‌شوند، نه فقط مسیرها؛ وگرنه در حالت
+    # به‌روزرسانی OPT_SOURCE خالی می‌ماند و مرحلهٔ ساخت اصلاً اجرا نمی‌شود.
+    # مقدار صریح خط فرمان بر مقدار ذخیره‌شده اولویت دارد.
+    OPT_DOMAIN=${OPT_DOMAIN:-$CFG_DOMAIN}
+    OPT_EMAIL=${OPT_EMAIL:-$CFG_EMAIL}
+    OPT_SOURCE=${OPT_SOURCE:-$CFG_SOURCE}
+    OPT_GIT_URL=${OPT_GIT_URL:-$CFG_GIT_URL}
+    OPT_GIT_REF=${OPT_GIT_REF:-$CFG_GIT_REF}
     OPT_WEBROOT=${OPT_WEBROOT:-$CFG_WEBROOT}
     OPT_REPO_DIR=${OPT_REPO_DIR:-$CFG_REPO_DIR}
-    OPT_DOMAIN=${OPT_DOMAIN:-$CFG_DOMAIN}
+    OPT_EXTRA_HOSTS=${OPT_EXTRA_HOSTS:-${CFG_EXTRA_HOSTS:-}}
+    # اگر خط فرمان --no-csp نداده و قبلاً هم خاموش شده بود، همان می‌ماند.
+    if [[ $OPT_ENABLE_CSP -eq 1 && ${CFG_ENABLE_CSP:-1} -eq 0 ]]; then
+      OPT_ENABLE_CSP=0
+    fi
+    if [[ -z ${OPT_DOMAIN:-} ]]; then
+      die "تنظیمات ذخیره‌شده ناقص است ($CONF_FILE). نصب تازه اجرا کنید."
+    fi
+    guard_webroot "$OPT_WEBROOT"
     return 0
   fi
 
