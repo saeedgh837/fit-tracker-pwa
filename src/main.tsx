@@ -3,7 +3,9 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
 import { initializeDB } from './db';
+import { registerPwa } from './hooks/usePwa';
 import './styles.css';
+registerPwa();
 const root = createRoot(document.getElementById('root')!);
 initializeDB()
   .then(() =>

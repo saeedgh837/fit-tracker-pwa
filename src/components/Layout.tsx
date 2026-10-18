@@ -35,10 +35,12 @@ export default function Layout() {
   const { date, setDate, setQuickAdd } = useUI();
   const [offline, setOffline] = useState(!navigator.onLine);
   const [dismissed, setDismissed] = useState('');
+  const [offlineReadySeen, setOfflineReadySeen] = useState(false);
   const [dbUpgrade, setDbUpgrade] = useState(false);
   const location = useLocation();
   const pwa = usePwa();
   const completion = dayCompletion(habits, habitLogs, today());
+  const offlineReady = pwa.offlineReady && !offlineReadySeen;
   useEffect(() => {
     const online = () => setOffline(!navigator.onLine);
     const upgrade = () => setDbUpgrade(true);
@@ -116,9 +118,27 @@ export default function Layout() {
             آفلاین هستید؛ ثبت‌ها همچنان روی دستگاه ذخیره می‌شوند.
           </p>
         )}
+        {offlineReady && (
+          <div role="status" className="banner row justify-between mb-4 flex-wrap">
+            <span>برنامه آمادهٔ کار آفلاین شد؛ می‌توانید بدون اینترنت هم ثبت کنید.</span>
+            <IconButton
+              label="بستن پیام آماده‌بودن آفلاین"
+              onClick={() => {
+                setOfflineReadySeen(true);
+                pwa.dismissOfflineReady();
+              }}
+            >
+              <X size={17} aria-hidden="true" />
+            </IconButton>
+          </div>
+        )}
         {(pwa.needRefresh || dbUpgrade) && (
           <div role="status" className="banner row justify-between mb-4 flex-wrap">
-            <span>نسخهٔ تازه آماده است. ابتدا فرم‌های باز را ذخیره کنید.</span>
+            <span>
+              {dbUpgrade
+                ? 'پایگاه‌داده در تب دیگری به‌روز شد. برای ادامه صفحه را دوباره بارگذاری کنید.'
+                : 'نسخهٔ تازه آماده است. ابتدا فرم‌های باز را ذخیره کنید.'}
+            </span>
             <Button
               variant="secondary"
               onClick={() => {
