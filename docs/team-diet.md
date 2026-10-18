@@ -11,6 +11,7 @@ Do not spawn agents, use git, commit, deploy, install/change dependencies, acces
 ## Read first and integration contract
 
 Read these absolute main-root paths before writing:
+
 - **C:/Users/Saeed/ai_projects/check-list/docs/CONTRACT.md**
 - **C:/Users/Saeed/ai_projects/check-list/src/db/types.ts**
 - **C:/Users/Saeed/ai_projects/check-list/docs/superpowers/specs/2026-10-18-fit-tracker-design.md**
@@ -21,6 +22,7 @@ Read these absolute main-root paths before writing:
 The manager implements ALL frozen shared imports. From top-level feature files consume only their published APIs: `db`, `uid`, `updateDay`, `changeWater` from `../../db`; types from `../../db/types`; synchronous reactive `useData` from `../../hooks/useData`; `useUI`, `run`, `toast` from `../../store/ui`; date helpers from `../../lib/dates`; `formatNumber` from `../../lib/format`; `nutritionTargets` from `../../lib/calculations`; UI primitives from `../../components/ui`; default `DataChart` from `../../components/DataChart`. Adjust relative depth for nested files. Never implement production fallbacks, ambient declarations, copied shared calculations, shared API stubs, or a second persistence store.
 
 Relevant frozen shapes:
+
 - `MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack'`.
 - `Nutrition = { calories:number; protein:number; carbs:number; fat:number }`.
 - `Food` adds `{ id:string; name:string; favorite:boolean; lastUsedAt:string|null }` to Nutrition.
@@ -50,6 +52,7 @@ The installed stack is React/TypeScript, Vitest/jsdom, Testing Library and fake 
 For each behavior batch: write tests first, run genuine RED, implement the minimum feature code, run GREEN, then refactor and rerun. A missing tool/package/shared module is a blocker, not intended RED. If necessary, add only a minimal importable unimplemented signature so assertions can fail on the missing behavior. Preserve actual commands, failing assertion excerpts, exit codes, and final test counts in the worker response; do not manufacture a pre-implementation failure after implementing.
 
 Required coverage:
+
 - Exact-day/group totals and no double counting; zero values, blank optional macros, invalid negatives/NaN/Infinity and whitespace names.
 - Food CRUD/favorites/recent ordering; add-food snapshot plus use timestamp; later library edits/deletion preserve old meal values and valid references.
 - Meal CRUD for two historical dates, edit identity/date preservation, cancel/confirm deletion, and failed-save draft retention.
@@ -58,11 +61,13 @@ Required coverage:
 - UI visible labels, RTL container, accessible dialog/confirmation interactions and empty/error states. Inspect chart input rows, not only mocked chart presence.
 
 Commands (run in main root; no install/network):
+
 ```sh
 npm --prefix "C:/Users/Saeed/ai_projects/check-list" run test -- src/features/diet --reporter=verbose
 node "C:/Users/Saeed/ai_projects/check-list/node_modules/eslint/bin/eslint.js" --config "C:/Users/Saeed/ai_projects/check-list/eslint.config.js" "C:/Users/Saeed/ai_projects/check-list/src/features/diet" --max-warnings 0
 node "C:/Users/Saeed/ai_projects/check-list/node_modules/typescript/bin/tsc" -p "C:/Users/Saeed/ai_projects/check-list/tsconfig.app.json" --noEmit
 ```
+
 Run the targeted Vitest command for both RED and GREEN. Lint must pass for owned files. Typecheck is application-wide: report exact manager/other-feature blockers without editing those files. Do not launch servers or require a browser download; manager handles app-wide browser/integration verification.
 
 ## Dependencies, risks and final worker report

@@ -11,6 +11,7 @@ Do not spawn agents, use git, commit, deploy, install/change dependencies, acces
 ## Read first and integration contract
 
 Read these absolute main-root paths before writing:
+
 - **C:/Users/Saeed/ai_projects/check-list/docs/CONTRACT.md**
 - **C:/Users/Saeed/ai_projects/check-list/src/db/types.ts**
 - **C:/Users/Saeed/ai_projects/check-list/docs/superpowers/specs/2026-10-18-fit-tracker-design.md**
@@ -21,6 +22,7 @@ Read these absolute main-root paths before writing:
 The manager implements ALL frozen shared imports. From top-level feature files consume only their published APIs: `db`, `uid`, `updateDay` from `../../db`; types from `../../db/types`; synchronous reactive `useData` from `../../hooks/useData`; `useUI`, `run`, `toast` from `../../store/ui`; date helpers from `../../lib/dates`; `formatNumber`, `toKg`, `fromKg` from `../../lib/format`; `metCalories` from `../../lib/calculations`; UI primitives from `../../components/ui`; default `DataChart` from `../../components/DataChart`. Adjust relative depth for nested files. Never implement production fallbacks, ambient declarations, copied shared MET tables/conversions, shared API stubs, or a second persistence store.
 
 Relevant frozen shapes:
+
 - `WorkoutType = 'walk'|'run'|'cycle'|'swim'|'strength'|'yoga'|'hiit'|'other'`.
 - `Intensity = 'light'|'moderate'|'vigorous'`.
 - `ExerciseSet = { name:string; sets:number; reps:number; weightKg:number }`.
@@ -52,6 +54,7 @@ The installed stack is React/TypeScript, Vitest/jsdom, Testing Library and fake 
 For each behavior batch: write tests first, run genuine RED, implement the minimum feature code, run GREEN, then refactor and rerun. A missing tool/package/shared module is a blocker, not intended RED. If necessary, add only a minimal importable unimplemented signature so assertions fail on the missing behavior. Preserve actual commands, failing assertion excerpts, exit codes and final test counts in the worker response; do not manufacture pre-implementation failures after implementing.
 
 Required coverage:
+
 - Validation for workouts, routine drafts and exercise rows, including zero load, empty rows, invalid enums, NaN/Infinity, fractional sets/reps, duration and steps bounds.
 - Shared estimator called with correct type/minutes/intensity/canonical weight; latest eligible historical weight, same-date time tie, profile fallback, unavailable weight, no future-weight leakage, and notes-only estimate preservation. Use real `metCalories` integration when available; a mocked return is not evidence that the shared MET formula is correct.
 - Workout/routine create/edit/delete, cancel/confirm destructive actions, routine deep-copy/use with new workout ID, library edits not mutating previous workouts, and failed-save draft retention.
@@ -62,11 +65,13 @@ Required coverage:
 - Persian accessible labels, RTL container, dialog/confirmation interactions, keyboard access and empty/error states. Exercise real fake-IndexedDB write integration when manager modules exist; label boundary mocks honestly.
 
 Commands (run in main root; no install/network):
+
 ```sh
 npm --prefix "C:/Users/Saeed/ai_projects/check-list" run test -- src/features/exercise --reporter=verbose
 node "C:/Users/Saeed/ai_projects/check-list/node_modules/eslint/bin/eslint.js" --config "C:/Users/Saeed/ai_projects/check-list/eslint.config.js" "C:/Users/Saeed/ai_projects/check-list/src/features/exercise" --max-warnings 0
 node "C:/Users/Saeed/ai_projects/check-list/node_modules/typescript/bin/tsc" -p "C:/Users/Saeed/ai_projects/check-list/tsconfig.app.json" --noEmit
 ```
+
 Run the targeted Vitest command for both RED and GREEN. Lint must pass for owned files. Typecheck is application-wide: report exact manager/other-feature blockers without editing those files. Do not launch servers or require a browser download; manager handles app-wide browser/integration verification.
 
 ## Dependencies, risks and final worker report

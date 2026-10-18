@@ -6,3 +6,6 @@ test-results
 package-lock.json
 .claude
 .superpowers
+docs/superpowers
+docs/team-*.md
+index.html
