@@ -6,7 +6,7 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # برای source کردن، main اجرا نمی‌شود (نگهبان BASH_SOURCE).
-# shellcheck disable=SC1090
+# shellcheck source=deploy/install.sh disable=SC1090,SC1091
 . "$SCRIPT_DIR/install.sh"
 
 # اسکریپت اصلی با set -Eeuo و trap ERR بالا می‌آید؛ در تست این‌ها را خنثی
@@ -49,6 +49,7 @@ for bad in / /etc /usr/bin /var /opt /root /dev/null '..' ''; do
 done
 
 # ------------------------------------------- build_server_names ----
+# shellcheck disable=SC2034  # در توابع source‌شدهٔ install.sh خوانده می‌شوند
 OPT_DOMAIN='fit.example.com'
 OPT_EXTRA_HOSTS=''
 t 'server_names: single' 'fit.example.com' "$(build_server_names)"
@@ -64,21 +65,23 @@ t 'extra_hosts: valid accepted' '0' "$?"
 t 'extra_hosts: invalid rejected' '1' "$?"
 
 # ------------------------------------------ domain/email regex ----
+# نتیجهٔ تطبیق را صریح در متغیر می‌گیریم؛ $? بعد از یک شرط مستقل قابل اتکا نیست.
+matches() { [[ $1 =~ $2 ]]; }
 for d in fit.example.com a-b.example.co.uk sub.domain.example.com; do
-  [[ $d =~ $VALID_DOMAIN_RE ]]
+  matches "$d" "$VALID_DOMAIN_RE"
   t "domain regex: accepts $d" '0' "$?"
 done
 for d in '-bad.example.com' 'nodot' 'a..b.com' 'example.c' '' 'a b.com'; do
-  if [[ $d =~ $VALID_DOMAIN_RE ]]; then r=0; else r=1; fi
-  t "domain regex: rejects '$d'" '1' "$r"
+  matches "$d" "$VALID_DOMAIN_RE"
+  t "domain regex: rejects '$d'" '1' "$?"
 done
 for e in me@example.com a.b+c@sub.example.co.uk; do
-  [[ $e =~ $VALID_EMAIL_RE ]]
+  matches "$e" "$VALID_EMAIL_RE"
   t "email regex: accepts $e" '0' "$?"
 done
 for e in 'noat' 'a@b' 'a b@example.com' '@example.com' ''; do
-  if [[ $e =~ $VALID_EMAIL_RE ]]; then r=0; else r=1; fi
-  t "email regex: rejects '$e'" '1' "$r"
+  matches "$e" "$VALID_EMAIL_RE"
+  t "email regex: rejects '$e'" '1' "$?"
 done
 
 # ------------------------------------------ write_if_changed ----
@@ -126,7 +129,9 @@ EOF
 )
 t 'site config: root is current symlink' 'yes' "$(grep -q 'root /var/www/hamgam/current;' <<<"$CONF" && echo yes || echo no)"
 t 'site config: server_name present' 'yes' "$(grep -q 'server_name fit.example.com;' <<<"$CONF" && echo yes || echo no)"
+# shellcheck disable=SC2016  # عمداً یک $ تحت‌اللفظی در کانفیگ تولیدشده را می‌جوییم
 t 'site config: $hamgam_cache not expanded' 'yes' "$(grep -q 'Cache-Control \$hamgam_cache' <<<"$CONF" && echo yes || echo no)"
+# shellcheck disable=SC2016  # عمداً یک $ تحت‌اللفظی در کانفیگ تولیدشده را می‌جوییم
 t 'site config: $uri not expanded' 'yes' "$(grep -q 'try_files \$uri =404;' <<<"$CONF" && echo yes || echo no)"
 t 'site config: no stray backslash-dollar' '0' "$(grep -c '\\\$' <<<"$CONF" | tr -d ' ')"
 t 'site config: headers included once' '1' "$(grep -c 'include /etc/nginx/snippets/hamgam-headers.conf;' <<<"$CONF" | tr -d ' ')"
