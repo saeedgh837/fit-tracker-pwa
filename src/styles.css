@@ -107,6 +107,10 @@ select {
   outline: 3px solid var(--primary);
   outline-offset: 4px;
 }
+main:focus,
+main:focus-visible {
+  outline: none;
+}
 input,
 select,
 textarea,
