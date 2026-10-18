@@ -138,6 +138,17 @@ die() {
 
 on_error() {
   local code=$1 line=$2 cmd=$3
+
+  # داخل یک زیرپوسته (مثلاً $(...) در آرگومان یک دستور) فراخوانی می‌شویم.
+  # آن‌جا die فقط همان زیرپوسته را می‌بندد و اسکریپت اصلی ادامه می‌دهد؛ پس
+  # نباید پیام «نصب متوقف شد» چاپ کنیم، وگرنه کاربر فکر می‌کند نصب شکست خورده
+  # در حالی که ادامه یافته است. به‌جایش یک هشدار صریح می‌دهیم.
+  if [[ ${BASH_SUBSHELL:-0} -gt 0 ]]; then
+    bad "یک دستور کمکی در زیرپوسته شکست خورد (کد $(fa "$code")): $cmd"
+    log "SUBSHELL ERROR line $line: $cmd (exit $code)"
+    return 0
+  fi
+
   bad "دستور زیر با کد $(fa "$code") شکست خورد"
   note "خط $(fa "$line"): $cmd"
   if [[ ${SWAP_DONE:-0} -eq 1 ]]; then
@@ -738,7 +749,7 @@ pick_build_user() {
   BUILD_USER=$candidate
   BUILD_UID=$(id -u "$BUILD_USER")
   BUILD_GID=$(id -g "$BUILD_USER")
-  ok "ساخت برنامه با کاربر $(BUILD_USER) انجام می‌شود (نه root)"
+  ok "ساخت برنامه با کاربر ${BUILD_USER} انجام می‌شود (نه root)"
   return 0
 }
 
