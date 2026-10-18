@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# همگام — نصب‌کنندهٔ خودکار روی Ubuntu/Debian با nginx و TLS
+# همگام | نصب‌کنندهٔ خودکار روی Ubuntu/Debian با nginx و TLS
 #
 # استفادهٔ سریع:
 #   sudo bash deploy/install.sh
@@ -65,7 +65,7 @@ readonly C_RESET C_BOLD C_DIM C_RED C_GREEN C_YELLOW C_CYAN C_TEAL
 
 readonly PERSIAN_DIGITS=(۰ ۱ ۲ ۳ ۴ ۵ ۶ ۷ ۸ ۹)
 
-# fa <عدد لاتین> — ارقام فارسی، برای متن‌های فارسی داخل پیام‌ها.
+# fa <عدد لاتین>: ارقام فارسی، برای متن‌های فارسی داخل پیام‌ها.
 fa() {
   local input=$1 out='' i ch
   for ((i = 0; i < ${#input}; i++)); do
@@ -89,7 +89,7 @@ init_log() {
   fi
   if [[ $LOG_READY -eq 1 ]]; then
     {
-      printf 'همگام installer v%s — %s\n' "$SCRIPT_VERSION" "$(date -Is)"
+      printf 'همگام installer v%s | %s\n' "$SCRIPT_VERSION" "$(date -Is)"
       printf 'command: %s\n\n' "$*"
     } >>"$LOG_PATH"
   fi
@@ -112,7 +112,7 @@ hr() { ui_out "${C_DIM}  ──────────────────�
 banner() {
   ui_out ''
   ui_out "${C_TEAL}${C_BOLD}   ╭──────────────────────────────────────────────────────────╮${C_RESET}"
-  ui_out "${C_TEAL}${C_BOLD}   │${C_RESET}  ${C_BOLD}${APP_NAME}${C_RESET}  ${C_DIM}— نصب‌کنندهٔ سرور${C_RESET}                                 ${C_TEAL}${C_BOLD}│${C_RESET}"
+  ui_out "${C_TEAL}${C_BOLD}   │${C_RESET}  ${C_BOLD}${APP_NAME}${C_RESET}  ${C_DIM}نصب‌کنندهٔ سرور${C_RESET}                                   ${C_TEAL}${C_BOLD}│${C_RESET}"
   ui_out "${C_TEAL}${C_BOLD}   │${C_RESET}  ${C_DIM}برنامهٔ سلامت روزانه · بدون سرور داده · آفلاین${C_RESET}          ${C_TEAL}${C_BOLD}│${C_RESET}"
   ui_out "${C_TEAL}${C_BOLD}   ╰──────────────────────────────────────────────────────────╯${C_RESET}"
   ui_out "${C_DIM}    نسخهٔ نصب‌کننده $(fa "$SCRIPT_VERSION") · لاگ: $LOG_FILE${C_RESET}"
@@ -123,7 +123,7 @@ STEP_INDEX=0
 step() {
   STEP_INDEX=$((STEP_INDEX + 1))
   ui_out ''
-  ui_out "${C_CYAN}${C_BOLD}  ▸ گام $(fa "$STEP_INDEX") از $(fa "$TOTAL_STEPS") — $*${C_RESET}"
+  ui_out "${C_CYAN}${C_BOLD}  ▸ گام $(fa "$STEP_INDEX") از $(fa "$TOTAL_STEPS"): $*${C_RESET}"
   hr
 }
 
@@ -180,7 +180,7 @@ OPT_KEEP_DEFAULT_SITE=0
 
 usage() {
   cat <<'USAGE'
-همگام — نصب‌کنندهٔ سرور
+همگام | نصب‌کنندهٔ سرور
 
   sudo bash deploy/install.sh [گزینه‌ها]
 
@@ -648,7 +648,7 @@ save_config() {
   mkdir -p "$CONF_DIR"
   chmod 700 "$CONF_DIR"
   cat >"$CONF_FILE" <<EOF
-# تنظیمات نصب همگام — این فایل توسط deploy/install.sh نوشته شده است.
+# تنظیمات نصب همگام؛ این فایل توسط deploy/install.sh نوشته شده است.
 CFG_DOMAIN='${OPT_DOMAIN}'
 CFG_EMAIL='${OPT_EMAIL}'
 CFG_SOURCE='${OPT_SOURCE}'
@@ -967,7 +967,7 @@ init_paths() {
 }
 
 write_if_changed() {
-  # write_if_changed <مسیر> — محتوا از stdin خوانده می‌شود.
+  # write_if_changed <مسیر>: محتوا از stdin خوانده می‌شود.
   # کد خروج ۰ یعنی فایل تغییر کرد، ۱ یعنی محتوا یکسان بود.
   local target=$1 tmp
   tmp=$(mktemp -t hamgam-wic.XXXXXX) || {
@@ -1122,13 +1122,17 @@ deploy_files() {
   systemctl reload nginx 2>/dev/null || true
 
   # نگه‌داشتن چند نسخهٔ آخر و پاک‌کردن بقیه. شکست در پاک‌سازی نباید نصب را
-  # متوقف کند.
-  local old
+  # متوقف کند. نکتهٔ مهم: نسخهٔ فعال و نسخه‌ای که --rollback به آن برمی‌گردد
+  # هرگز پاک نمی‌شوند، وگرنه بازگردانی به مسیر ناموجود اشاره می‌کند.
+  local old keep_current keep_previous
+  keep_current=$(current_release)
+  keep_previous=''
+  [[ -r $PREVIOUS_MARK ]] && keep_previous=$(cat "$PREVIOUS_MARK")
   while IFS= read -r old; do
     [[ -n $old ]] || continue
-    [[ $old == "$SITE_ROOT/releases/"* ]] || continue
-    [[ $old == "$(current_release)" ]] && continue
-    [[ $old == "$prev_release" ]] && continue
+    [[ $old == "$RELEASES_DIR/"* ]] || continue
+    [[ $old == "$keep_current" ]] && continue
+    [[ $old == "$keep_previous" ]] && continue
     rm -rf "$old" 2>/dev/null || warn "پاک‌کردن نسخهٔ قدیمی ناموفق بود: $old"
   done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null |
     sort -rn | tail -n "+$((RELEASES_KEEP + 1))" | cut -d' ' -f2-)
@@ -1146,7 +1150,7 @@ write_headers_snippet() {
   fi
 
   if write_if_changed "$HEADERS_SNIPPET" <<EOF
-# تولیدشده توسط deploy/install.sh — دستی ویرایش نکنید.
+# تولیدشده توسط deploy/install.sh؛ دستی ویرایش نکنید.
 add_header X-Content-Type-Options "nosniff" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 add_header X-Frame-Options "DENY" always;
@@ -1167,7 +1171,7 @@ EOF
 # ۱٫۲۹٫۳ به بعد هست و روی اوبونتو ۲۲٫۰۴ موجود نیست.)
 write_cache_map() {
   if write_if_changed "$CACHE_MAP" <<'EOF'
-# تولیدشده توسط deploy/install.sh — دستی ویرایش نکنید.
+# تولیدشده توسط deploy/install.sh؛ دستی ویرایش نکنید.
 # فایل‌های assets نام هش‌دار دارند و هرگز تغییر نمی‌کنند؛ پوستهٔ برنامه،
 # سرویس‌ورکر و مانیفست هرگز نباید کش شوند وگرنه نسخهٔ تازه به کاربر نمی‌رسد.
 map $uri $hamgam_cache {
@@ -1211,7 +1215,7 @@ write_site_config() {
   local server_names
   server_names=$(build_server_names)
   if write_if_changed "$NGINX_SITE" <<EOF
-# تولیدشده توسط deploy/install.sh — برای تغییرات پایدار این فایل را مستقیم
+# تولیدشده توسط deploy/install.sh؛ برای تغییرات پایدار این فایل را مستقیم
 # ویرایش نکنید؛ اسکریپت را دوباره اجرا کنید.
 #
 # هدرهای امنیتی و سیاست کش در سطح server تعریف می‌شوند و هیچ location ای
@@ -1410,7 +1414,7 @@ dns_report() {
   elif [[ -n $public_ip && " $v4 " == *" $public_ip "* ]]; then
     ok "دامنه به این سرور اشاره می‌کند ($public_ip)"
   else
-    note "DNS دامنه: ${v4:-—} ${v6:+· IPv6: $v6}"
+    note "DNS دامنه: IPv4=${v4:-ندارد} IPv6=${v6:-ندارد}"
     if [[ -n $public_ip ]]; then note "IP عمومی این سرور: $public_ip"; fi
     if [[ ${ns,,} == *cloudflare* ]]; then
       note 'دامنه از Cloudflare استفاده می‌کند؛ اگر ابر نارنجی روشن باشد، آدرس لبهٔ Cloudflare دیده می‌شود'
@@ -1688,7 +1692,7 @@ health_check() {
     health_fail 'سرویس‌ورکر معتبر به نظر نمی‌رسد'
   fi
 
-  # ۶) HTTPS — برای یک PWA ضروری است، نه تزئینی.
+  # ۶) HTTPS برای یک PWA ضروری است، نه تزئینی.
   if [[ $OPT_SKIP_TLS -eq 0 ]]; then
     if https_works; then
       health_pass 'HTTPS با گواهی معتبر کار می‌کند'

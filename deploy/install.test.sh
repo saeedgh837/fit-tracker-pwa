@@ -316,6 +316,43 @@ UPDATE_ONLY=1
 t 'update: incomplete conf fails clearly' '1' "$?"
 UPDATE_ONLY=0
 
+# ----------------------------------------- release retention ----
+# پاک‌سازی نسخه‌های قدیمی نباید هرگز نسخهٔ فعال یا هدف بازگردانی را ببرد،
+# وگرنه بعد از معتبر بودن مسیر، --rollback به مسیر ناموجود اشاره می‌کند.
+PR="$TMP/prune/www"
+mkdir -p "$PR/releases"
+# RELEASES_KEEP در install.sh به‌صورت readonly تعریف شده و قابل تغییر نیست؛
+# تست با همان مقدار پیش‌فرض کار می‌کند.
+OPT_WEBROOT="$PR"
+init_paths
+keep_a="$RELEASES_DIR/r-keep"; mkdir -p "$keep_a"
+prev_b="$RELEASES_DIR/r-prev"; mkdir -p "$prev_b"
+old1="$RELEASES_DIR/r-old1"; mkdir -p "$old1"
+old2="$RELEASES_DIR/r-old2"; mkdir -p "$old2"
+atomic_swap "$keep_a"
+printf '%s\n' "$prev_b" >"$PREVIOUS_MARK"
+# ترتیب زمانی ساخت را شبیه‌سازی می‌کنیم تا نسخه‌های قدیمی از سقف بیرون بزنند.
+touch -d '2026-01-01 00:00:00' "$old2"
+touch -d '2026-01-02 00:00:00' "$old1"
+touch -d '2026-01-03 00:00:00' "$prev_b"
+touch -d '2026-01-04 00:00:00' "$keep_a"
+
+keep_current=$(current_release)
+keep_previous=$(cat "$PREVIOUS_MARK")
+while IFS= read -r old; do
+  [[ -n $old ]] || continue
+  [[ $old == "$RELEASES_DIR/"* ]] || continue
+  [[ $old == "$keep_current" ]] && continue
+  [[ $old == "$keep_previous" ]] && continue
+  rm -rf "$old" 2>/dev/null || true
+done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null |
+  sort -rn | tail -n "+$((RELEASES_KEEP + 1))" | cut -d' ' -f2-)
+
+t 'retention: live release kept' 'yes' "$([[ -d $keep_a ]] && echo yes || echo no)"
+t 'retention: rollback target kept' 'yes' "$([[ -d $prev_b ]] && echo yes || echo no)"
+t 'retention: oldest release removed' 'no' "$([[ -d $old2 ]] && echo yes || echo no)"
+t 'retention: live symlink still resolves' 'yes' "$([[ -f $CURRENT_LINK/index.html || -d $CURRENT_LINK ]] && echo yes || echo no)"
+
 # --------------------------------------------------------- نتیجه ----
 printf '\n──────────────────────────────\n'
 printf 'passed: %d\nfailed: %d\n' "$PASS" "$FAIL"
