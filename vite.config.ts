@@ -41,6 +41,10 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
+        // Take over the tab that registered us so a first visit can go offline
+        // without a manual reload. Updates still wait for the user's go-ahead
+        // through the in-app banner, so skipWaiting stays off.
+        clientsClaim: true,
       },
       devOptions: { enabled: false },
     }),
