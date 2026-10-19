@@ -32,7 +32,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION='2.0.0'
+readonly SCRIPT_VERSION='2.1.0'
 readonly APP_NAME='Hamgam'
 readonly REPO_URL_DEFAULT='https://github.com/saeedgh837/fit-tracker-pwa.git'
 readonly CONF_DIR='/etc/hamgam'
@@ -122,35 +122,68 @@ step() {
   hr
 }
 
-die() {
-  bad "$*"
+# ------------------------------------------------- stopping on failure ----
+# One place ends an install, whichever frame noticed the failure. A failure
+# reported deeper down comes back through an OR-list, and a status that arrives
+# that way must still roll a live release back and still print exactly one
+# closing banner. So the status travels, the rollback happens here, and the
+# frame below says nothing about stopping: this is the frame that stops it.
+STOPPING=0
+STOP_STATUS=0
+stop_install() {
+  local status=${1:-1}
+
+  # A second failure while already stopping — most often the rollback below
+  # failing on an already-broken system — must not replace the status that
+  # explains the install, and must not stop the first call from finishing.
+  [[ $STOPPING -eq 0 ]] || exit "$STOP_STATUS"
+  STOPPING=1
+  STOP_STATUS=$status
+
   ui_out ''
   ui_out "${C_RED}${C_BOLD}  Installation stopped.${C_RESET}"
   ui_out "  ${C_DIM}Review the live release before retrying. Use --rollback to restore the previous release if needed.${C_RESET}"
   if [[ $LOG_READY -eq 1 ]]; then ui_out "  ${C_DIM}full log: $LOG_FILE${C_RESET}"; fi
-  exit 1
+
+  # Rollback last, and after the banner: an install that already swapped the
+  # release in has put something unproven in front of users, so it goes back.
+  # The default matters: this can run before SWAP_DONE is initialised. A failing
+  # rollback reports itself and exits, and the status above still wins.
+  if [[ ${SWAP_DONE:-0} -eq 1 ]]; then
+    warn 'The new release was already live; rolling back to the previous one...'
+    rollback_deploy || true
+  fi
+  exit "$STOP_STATUS"
+}
+
+die() {
+  local message=$1 status=${2:-1}
+  bad "$message"
+  # In a subshell this only ends the subshell; the caller sees the status and
+  # calls stop_install, which is the frame that can actually stop the install.
+  if [[ $BASH_SUBSHELL -gt 0 ]]; then
+    log "SUBSHELL FAILURE (exit $status): $message"
+    exit "$status"
+  fi
+  stop_install "$status"
 }
 
 on_error() {
   local code=$1 line=$2 cmd=$3
 
-  # We are inside a subshell (a command substitution in an argument list).
-  # There, die only closes that subshell and the main script carries on, so
-  # printing the "Installation stopped" banner would be a lie. Report it
-  # plainly instead of claiming the install stopped when it did not.
-  if [[ ${BASH_SUBSHELL:-0} -gt 0 ]]; then
-    bad "A helper command failed inside a subshell (exit $code): $cmd"
+  # A failing command substitution (or `( ... )`) runs this in a subshell. There
+  # it must end that subshell, not just report and return: returning would let
+  # the assignment finish with whatever it produced and the install run on with
+  # a value nobody checked. Set -e still stops the parent, which reports it.
+  if [[ $BASH_SUBSHELL -gt 0 ]]; then
+    bad "A helper command failed in a subshell (exit $code): $cmd"
     log "SUBSHELL ERROR line $line: $cmd (exit $code)"
-    return 0
+    exit "$code"
   fi
 
   bad "Command failed with exit code $code"
   note "line $line: $cmd"
-  if [[ ${SWAP_DONE:-0} -eq 1 ]]; then
-    warn 'The new release was already live; rolling back to the previous one...'
-    rollback_deploy || true
-  fi
-  die 'Details were written to the log.'
+  stop_install "$code"
 }
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
@@ -172,6 +205,7 @@ OPT_CF_CREDENTIALS=''
 OPT_ENABLE_CSP=1
 OPT_SKIP_TLS=0
 OPT_KEEP_DEFAULT_SITE=0
+OPT_SWAP=off
 
 usage() {
   cat <<'USAGE'
@@ -196,6 +230,10 @@ Options:
                            Cloudflare credentials for a DNS-01 certificate.
                            Needed when the domain sits behind the Cloudflare
                            proxy. File format: dns_cloudflare_api_token = <token>
+  --swap=<off|auto>      off (default): never create swap, even with --yes
+                           auto: allow 2 GiB of runtime swap if a build needs it
+                           Swap stays active after success or failure; the file
+                           stays after reboot. No /etc/fstab changes are made.
   --keep-default-site    leave the default nginx site alone (default: ask)
   --no-csp               do not send a Content-Security-Policy header
   --skip-tls             no certificate, HTTP only (testing mode)
@@ -220,6 +258,8 @@ parse_args() {
       --webroot) OPT_WEBROOT=${2:-}; shift 2 ;;
       --repo-dir) OPT_REPO_DIR=${2:-}; shift 2 ;;
       --cf-credentials) OPT_CF_CREDENTIALS=${2:-}; shift 2 ;;
+      --swap=*) OPT_SWAP=${1#--swap=}; shift ;;
+      --swap) [[ $# -ge 2 ]] || die '--swap needs off or auto.'; OPT_SWAP=$2; shift 2 ;;
       --no-csp) OPT_ENABLE_CSP=0; shift ;;
       --skip-tls) OPT_SKIP_TLS=1; shift ;;
       --keep-default-site) OPT_KEEP_DEFAULT_SITE=1; shift ;;
@@ -231,6 +271,10 @@ parse_args() {
       *) die "Unknown option: $1 (run with --help for usage)" ;;
     esac
   done
+  case $OPT_SWAP in
+    off | auto) ;;
+    *) die 'Invalid --swap policy; use --swap=off or --swap=auto.' ;;
+  esac
 }
 
 # ------------------------------------------------------------- helpers ----
@@ -483,17 +527,205 @@ preflight() {
   fi
   ok 'Base tools are present'
 
-  # Memory warning: building on a 1 GB server can run out of memory.
-  local mem_mb swap_mb
-  mem_mb=$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
-  swap_mb=$(awk '/^SwapTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
-  log "mem: ${mem_mb}MB swap: ${swap_mb}MB"
-  if [[ -n $mem_mb && $mem_mb -lt 1500 && $swap_mb -lt 512 ]]; then
-    warn "This server has little memory (RAM $mem_mb MB, swap $swap_mb MB)."
-    note 'Building on the server may fail. Prefer --source prebuilt with an artifact from CI,'
-    note 'or create swap first: sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile'
-  fi
+  # Source-build admission is checked later, after the source mode is known.
+  # Prebuilt installs and rollbacks must not prepare or mutate swap.
   return 0
+}
+
+# ---------------------------------------------------- build memory policy ----
+BUILD_MEM_MB=0
+BUILD_AVAIL_MB=0
+BUILD_SWAP_FREE_MB=0
+BUILD_MEMORY_KNOWN=0
+BUILD_MEMORY_RESTRICTED=1
+BUILD_CGROUP_DIRS=()
+
+read_host_memory() {
+  local file=${1:-/proc/meminfo}
+  read -r BUILD_MEM_MB BUILD_AVAIL_MB BUILD_SWAP_FREE_MB < <(
+    awk '/^MemTotal:/ {m=int($2/1024)} /^MemAvailable:/ {a=int($2/1024)}
+      /^SwapFree:/ {s=int($2/1024)} END {print m+0, a+0, s+0}' "$file"
+  )
+}
+
+# Inspect every visible ancestor, not just the leaf. Unknown accounting must
+# never turn host RAM/swap into a false promise of container build capacity.
+read_cgroup_limits() {
+  local membership=$1 mount=$2 mount_root=$3 path dir value current mb free_mb
+  BUILD_MEMORY_KNOWN=0 BUILD_MEMORY_RESTRICTED=1 BUILD_CGROUP_DIRS=()
+  [[ $mount_root == / && -r $mount/cgroup.controllers ]] || return 0
+  # Only the full hierarchy root lacks these limit files. A namespaced root
+  # exposing max still may have finite, hidden ancestors: do not trust it.
+  [[ ! -e $mount/memory.max && ! -e $mount/memory.swap.max ]] || return 0
+  path=$(awk -F: '$1 == "0" && $2 == "" {print $3}' "$membership")
+  [[ $path == /* && $path != *..* && $path != *$'\n'* ]] || return 0
+  # Hybrid/v1 accounting is deliberately unsupported.
+  if grep -qE '^[1-9][0-9]*:.*memory' "$membership"; then return 0; fi
+  dir="${mount%/}${path%/}"
+  BUILD_MEMORY_RESTRICTED=0
+  while :; do
+    BUILD_CGROUP_DIRS+=("$dir")
+    local resource
+    for resource in memory memory.swap; do
+      # The full hierarchy root cannot itself be resource-limited.
+      if [[ $dir == "${mount%/}" && ! -e $dir/$resource.max ]]; then continue; fi
+      [[ -r $dir/$resource.max && -r $dir/$resource.current ]] || return 0
+      value=$(<"$dir/$resource.max")
+      current=$(<"$dir/$resource.current")
+      [[ $current =~ ^[0-9]{1,18}$ ]] || return 0
+      if [[ $value == max ]]; then continue; fi
+      [[ $value =~ ^[0-9]{1,18}$ ]] || return 0
+      BUILD_MEMORY_RESTRICTED=1
+      mb=$((value / 1048576))
+      free_mb=$(((value > current ? value - current : 0) / 1048576))
+      if [[ $resource == memory ]]; then
+        if [[ $mb -lt $BUILD_MEM_MB ]]; then BUILD_MEM_MB=$mb; fi
+        if [[ $free_mb -lt $BUILD_AVAIL_MB ]]; then BUILD_AVAIL_MB=$free_mb; fi
+      elif [[ $free_mb -lt $BUILD_SWAP_FREE_MB ]]; then
+        BUILD_SWAP_FREE_MB=$free_mb
+      fi
+    done
+    [[ $dir == "${mount%/}" ]] && break
+    dir=${dir%/*}
+    [[ $dir == "$mount" || $dir == "$mount/"* ]] || return 0
+  done
+  BUILD_MEMORY_KNOWN=1
+}
+
+in_build_container() {
+  [[ -e /.dockerenv || -e /run/.containerenv || -n ${container:-} ]] ||
+    { have systemd-detect-virt && systemd-detect-virt --container --quiet; }
+}
+
+read_build_memory() {
+  read_host_memory /proc/meminfo
+  BUILD_MEMORY_KNOWN=0 BUILD_MEMORY_RESTRICTED=1 BUILD_CGROUP_DIRS=()
+  # Container namespaces may hide ancestors even when FSROOT reads '/'.
+  # Prebuilt is the supported fallback rather than guessing host allowances.
+  in_build_container && return 0
+  [[ $(readlink /proc/self/ns/cgroup) == "$(readlink /proc/1/ns/cgroup)" ]] || return 0
+  local mount='' root=''
+  read -r mount root < <(findmnt -rn -t cgroup2 -o TARGET,FSROOT 2>/dev/null) || true
+  read_cgroup_limits /proc/self/cgroup "$mount" "$root"
+}
+
+memory_snapshot() {
+  local dir
+  log "memory: effective RAM=${BUILD_MEM_MB}MiB available=${BUILD_AVAIL_MB}MiB usable swap free=${BUILD_SWAP_FREE_MB}MiB accounting known=$BUILD_MEMORY_KNOWN restricted=$BUILD_MEMORY_RESTRICTED"
+  if [[ $LOG_READY -eq 1 ]]; then
+    grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo >>"$LOG_PATH" || true
+    for dir in "${BUILD_CGROUP_DIRS[@]}"; do
+      log "cgroup: $dir"
+      local resource
+      for resource in memory.max memory.current memory.swap.max memory.swap.current; do
+        if [[ -r $dir/$resource ]]; then log "$resource=$(<"$dir/$resource")"; fi
+      done
+      cat "$dir/memory.events" >>"$LOG_PATH" 2>/dev/null || true
+    done
+  fi
+}
+
+# Return 0 for active, 1 for inactive, 2 when the state cannot be established.
+swap_file_active() {
+  [[ -r /proc/swaps ]] || return 2
+  awk -v file="$1" 'NR>1 && $1==file {found=1} END {exit !found}' /proc/swaps
+}
+
+trusted_swap_parent() {
+  local path=$1 owner mode
+  while :; do
+    [[ -d $path && ! -L $path ]] || return 1
+    owner=$(stat -c '%u' "$path") || return 1
+    mode=$(stat -c '%a' "$path") || return 1
+    [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 1
+    (( (8#$mode & 0022) == 0 )) || return 1
+    [[ $path == / ]] && break
+    path=$(dirname "$path")
+  done
+}
+
+# An exclusive directory and a restrictive umask precede allocation. Retain
+# activated swap even on failure: automatic swapoff can itself trigger OOM.
+create_build_swap() (
+  local dir=${1:-/var/lib/hamgam-build-swap} file parent fs avail_kb
+  local directory_id='' file_id='' retained=0 state=2
+  file="$dir/swapfile"
+  parent=$(dirname "$dir")
+  [[ ! -e $dir && ! -L $dir ]] || die "Swap path already exists: $dir. Inspect it manually; it will not be reused or overwritten."
+  trusted_swap_parent "$parent" || die "Unsafe parent directory for swap: $parent"
+  umask 077
+  mkdir -m 700 -- "$dir" || die "Could not exclusively create $dir."
+  # The caller runs this through `|| { ... }`, which suspends errexit for the
+  # whole call: every step from here on has to check itself, or a failure would
+  # carry on and the cleanup would be left without an identity to compare.
+  directory_id=$(stat -c '%d:%i' "$dir") || die 'Could not read the swap directory identity.'
+  [[ -n $directory_id ]] || die 'Could not read the swap directory identity.'
+
+  # shellcheck disable=SC2317  # invoked by the subshell's EXIT trap
+  cleanup_new_swap() {
+    [[ $retained -eq 0 && ! -L $dir && $(stat -c '%d:%i' "$dir" 2>/dev/null) == "$directory_id" ]] || return 0
+    if [[ -e $file || -L $file ]]; then
+      [[ -n $file_id && ! -L $file && $(stat -c '%d:%i' "$file" 2>/dev/null) == "$file_id" ]] || return 0
+      state=0
+      swap_file_active "$file" || state=$?
+      if [[ $state -ne 1 ]]; then
+        warn "Swap activation is active or uncertain; retaining $file."
+        return 0
+      fi
+      rm -f -- "$file" || return 0
+    fi
+    rmdir -- "$dir" 2>/dev/null || true
+  }
+  trap cleanup_new_swap EXIT
+
+  fs=$(findmnt -rn -T "$dir" -o FSTYPE) || die 'Could not identify the swap filesystem.'
+  case $fs in ext4 | xfs) ;; *) die "Automatic swap requires ext4 or XFS, not $fs. Use --source prebuilt." ;; esac
+  avail_kb=$(df -Pk "$dir" | awk 'NR==2 {print $4}')
+  [[ $avail_kb =~ ^[0-9]+$ && $avail_kb -ge 4194304 ]] ||
+    die 'Swap needs 2 GiB for allocation plus 2 GiB of free disk space remaining.'
+  note "Creating 2 GiB of runtime swap at $file..."
+  local status=0
+  dd if=/dev/zero of="$file" bs=1M count=2048 conv=excl,fsync oflag=nofollow >>"$LOG_PATH" 2>&1 || status=$?
+  if [[ -f $file && ! -L $file ]]; then file_id=$(stat -c '%d:%i' "$file"); fi
+  [[ $status -eq 0 ]] || die 'Swap allocation failed; inactive partial files will be removed.'
+  [[ -f $file && ! -L $file && $(stat -c '%u:%a:%h' "$file") == '0:600:1' ]] ||
+    die 'The new swapfile failed its ownership, mode or hard-link check.'
+  run_logged mkswap "$file" || die 'mkswap failed. Use a prebuilt bundle instead.'
+  run_logged swapon "$file" || die 'swapon failed (host/kernel restrictions or unsupported file). Use --source prebuilt.'
+  if ! swap_file_active "$file"; then
+    retained=1
+    die "Could not confirm activation; retaining $file for manual inspection."
+  fi
+  retained=1
+  ok "Runtime swap active: $file (2 GiB)"
+  warn 'Swap remains active after success or failure. The file remains after reboot.'
+  note 'No /etc/fstab changes were made. Never remove the file while it is active.'
+)
+
+prepare_build_memory() {
+  read_build_memory
+  memory_snapshot
+  [[ $BUILD_MEMORY_KNOWN -eq 1 && $BUILD_MEM_MB -gt 0 ]] ||
+    die 'Cannot safely determine build memory/cgroup limits. Use --source prebuilt with an APP_BASE=/ bundle.'
+  if [[ $BUILD_MEM_MB -ge 1536 || $BUILD_SWAP_FREE_MB -ge 1024 ]]; then return 0; fi
+  warn "Source build has only ${BUILD_MEM_MB} MiB RAM and ${BUILD_SWAP_FREE_MB} MiB of usable free swap."
+  if [[ $OPT_SWAP != auto ]]; then
+    die 'Not starting a low-memory build. Re-run with --swap=auto to allow runtime swap, or use --source prebuilt.'
+  fi
+  if [[ $BUILD_MEMORY_RESTRICTED -eq 1 ]] || in_build_container; then
+    die 'Automatic host swap is disabled in containers or limited cgroups. Provide allowed swap externally or use --source prebuilt.'
+  fi
+  # The helper runs in a subshell, so its own die() can only end that subshell.
+  # The status is handed to the frame that can stop the install. The subshell
+  # can fail before SWAP_DONE is set: default it here.
+  local status=0
+  create_build_swap /var/lib/hamgam-build-swap || {
+    status=$?
+    stop_install "$status"
+  }
+  read_build_memory
+  memory_snapshot
+  [[ $BUILD_SWAP_FREE_MB -ge 1024 ]] || die 'Usable swap is still below 1024 MiB; refusing the build. Use --source prebuilt.'
 }
 
 # ---------------------------------------------------------- settings -------
@@ -776,7 +1008,7 @@ pick_build_user() {
 run_as_build_user() {
   local dir=$1
   shift
-  local out=/dev/null
+  local out=/dev/null status=0
   if [[ $LOG_READY -eq 1 ]]; then out=$LOG_PATH; fi
   log "run(as ${BUILD_USER:-root}): $*"
 
@@ -784,20 +1016,41 @@ run_as_build_user() {
     if [[ $BUILD_UID -ne 0 ]]; then
       warn 'setpriv is not available; building as root.'
     fi
-    if ! (cd "$dir" && "$@") >>"$out" 2>&1; then
-      log "FAILED: $*"
-      return 1
-    fi
-    return 0
+    (cd "$dir" && "$@") >>"$out" 2>&1 || status=$?
+  else
+    (
+      cd "$dir" || exit 1
+      setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --clear-groups \
+        env HOME="$BUILD_HOME" npm_config_cache="$BUILD_HOME/.npm" "$@"
+    ) >>"$out" 2>&1 || status=$?
   fi
+  if [[ $status -ne 0 ]]; then log "FAILED (exit $status): $*"; fi
+  return "$status"
+}
 
-  if ! (
-    cd "$dir" || exit 1
-    setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --clear-groups \
-      env HOME="$BUILD_HOME" npm_config_cache="$BUILD_HOME/.npm" "$@"
-  ) >>"$out" 2>&1; then
-    log "FAILED: $*"
-    return 1
+# Keep diagnostic failures from masking the observed npm status. npm may itself
+# normalise a child's status; only report the status that we actually observed.
+run_build_phase() {
+  local dir=$1 label=$2 started status=0
+  shift 2
+  started=$(date +%s)
+  log "$label started; inherited NODE_OPTIONS=${NODE_OPTIONS:-unset}; command: $*"
+  read_build_memory
+  memory_snapshot
+  run_as_build_user "$dir" "$@" || status=$?
+  log "$label finished after $(($(date +%s) - started))s (exit $status)"
+  if [[ $status -ne 0 ]]; then
+    read_build_memory || true
+    memory_snapshot || true
+    # Bound diagnostics to this phase. Failure to read the kernel log is benign.
+    if [[ $LOG_READY -eq 1 ]] && have journalctl; then
+      journalctl -k --since "@$started" --no-pager -n 100 >>"$LOG_PATH" 2>&1 || true
+    fi
+    if [[ $status -eq 137 ]]; then
+      warn 'Exit 137 is compatible with SIGKILL, not proof of OOM. Check kernel/cgroup evidence in the log.'
+    fi
+    note 'For a small VPS, allow runtime swap with --swap=auto or deploy an APP_BASE=/ prebuilt bundle.'
+    die "$label failed (exit $status). No new release was deployed. See the full log." "$status"
   fi
   return 0
 }
@@ -856,6 +1109,13 @@ build_project() {
     warn 'No package-lock.json; falling back to npm install.'
   fi
 
+  # Stop here, in the frame that can: build_project's caller only forwards a
+  # status, and forwarding is what used to hide the cause and skip the rollback.
+  local mem_status=0
+  prepare_build_memory || {
+    mem_status=$?
+    stop_install "$mem_status"
+  }
   pick_build_user
 
   # Hand the cloned repository to the build user so npm can write to it. For a
@@ -870,28 +1130,23 @@ build_project() {
   chmod 700 "$BUILD_HOME"
 
   note 'Installing dependencies (this can take a few minutes)...'
-  local mem_mb extra_env=()
-  mem_mb=$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
-  if [[ -n $mem_mb && $mem_mb -lt 1500 ]]; then
-    # A heap cap does not guarantee against OOM, but it eases memory pressure.
+  local extra_env=()
+  if [[ $BUILD_MEM_MB -lt 1536 ]]; then
+    # The cap bounds old-space only. Swap also backs native/child allocations.
     extra_env=(env NODE_OPTIONS=--max-old-space-size=512)
-    note 'This server has little memory; capping the Node heap.'
+    note 'Low-memory build: Node old-space capped at 512 MiB (not total process memory).'
   fi
 
   if [[ -f $dir/package-lock.json ]]; then
-    run_as_build_user "$dir" "${extra_env[@]}" npm ci --no-audit --no-fund ||
-      die 'npm ci failed. See the full log.'
+    run_build_phase "$dir" 'Dependency installation' "${extra_env[@]}" npm ci --no-audit --no-fund
   else
-    run_as_build_user "$dir" "${extra_env[@]}" npm install --no-audit --no-fund ||
-      die 'npm install failed.'
+    run_build_phase "$dir" 'Dependency installation' "${extra_env[@]}" npm install --no-audit --no-fund
   fi
   ok 'Dependencies installed'
 
   note 'Building the production bundle...'
   # APP_BASE=/ because this install is served from the domain root.
-  if ! run_as_build_user "$dir" "${extra_env[@]}" env APP_BASE=/ npm run build; then
-    die 'The build failed. Run npm run build by hand to see why.'
-  fi
+  run_build_phase "$dir" 'Production build' "${extra_env[@]}" env APP_BASE=/ npm run build
   BUILD_DIR="$dir/dist"
   ok 'Build finished'
   return 0
@@ -926,7 +1181,7 @@ validate_build() {
   local refs a
   local missing_assets=0 total_assets=0
   refs=$(grep -oE '(src|href)="[^"]*/assets/[^"]+"' "$dir/index.html" |
-    sed -E 's/.*="([^"]*)".*/\1/' | sort -u || true)
+    sed -E 's/.*="([^"]*)".*/\1/' | sort -u) || true
   while IFS= read -r a; do
     [[ -n $a ]] || continue
     total_assets=$((total_assets + 1))
@@ -979,7 +1234,14 @@ write_if_changed() {
     return 1
   fi
   mkdir -p "$(dirname "$target")"
-  install -m 0644 "$tmp" "$target"
+  # Callers use this as an `if` condition, which suspends errexit for the whole
+  # call, and "unchanged" is also a non-zero return. So a write that fails has
+  # to announce itself, or the caller would treat a broken config as current.
+  install -m 0644 "$tmp" "$target" || {
+    rm -f "$tmp"
+    warn "Could not write $target."
+    return 1
+  }
   rm -f "$tmp"
   return 0
 }
@@ -1842,6 +2104,13 @@ main() {
   collect_config
   save_config
 
+  # The summary returns non-zero when health checks failed. That is an outcome
+  # to report, not an abort, so it must not reach the error trap: the release
+  # stays live and rolling back is the operator's call. A `return` would hand a
+  # non-zero status to the top-level caller under set -e, where the trap would
+  # read it as a crash, print a second closing banner and undo a finished
+  # install. `exit` carries the status out without any of that.
+  local outcome=0
   if [[ $UPDATE_ONLY -eq 1 ]]; then
     # Update mode still takes the lock, validates the build, supports rollback
     # and runs the health check; only system packages and the nginx config are
@@ -1850,18 +2119,18 @@ main() {
     deploy_files
     configure_nginx
     health_check
-    summary
-    return $?
+    summary || outcome=$?
+  else
+    install_packages
+    fetch_and_build
+    deploy_files
+    configure_nginx
+    configure_firewall
+    setup_tls
+    health_check
+    summary || outcome=$?
   fi
-
-  install_packages
-  fetch_and_build
-  deploy_files
-  configure_nginx
-  configure_firewall
-  setup_tls
-  health_check
-  summary
+  exit "$outcome"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

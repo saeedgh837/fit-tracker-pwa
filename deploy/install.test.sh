@@ -110,6 +110,33 @@ t 'write_if_changed: mode 0644' '644' "$(stat -c '%a' "$target")"
 # per platform, so count leftovers against our own prefix.
 t 'write_if_changed: no temp leak' '0' "$(find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -name 'hamgam-wic.*' 2>/dev/null | wc -l | tr -d ' ')"
 
+# Production calls this as an `if` condition, which suspends errexit for the
+# whole call. A failed write must therefore be announced by the function itself:
+# the condition is false either way, so silence means nginx keeps an old config.
+(
+  install() { return 1; }
+  if write_if_changed "$TMP/never.conf" <<<"content"; then :; fi
+) >"$TMP/status" 2>&1
+t 'write_if_changed: a failed write says so' 'yes' "$(grep -qi 'could not write' "$TMP/status" && printf yes || printf no)"
+t 'write_if_changed: a failed write is not silent' 'no' "$([[ -s $TMP/status ]] && printf no || printf yes)"
+t 'write_if_changed: a failed write leaves no target behind' 'no' "$([[ -e $TMP/never.conf ]] && printf yes || printf no)"
+
+# -------------------------------------------- build command status ----
+# Preserve the child's status: 137 is useful evidence of SIGKILL, not proof of OOM.
+(BUILD_UID=0; run_as_build_user "$TMP" bash -c 'exit 137')
+t 'build runner: preserves SIGKILL status' '137' "$?"
+(BUILD_UID=0; run_as_build_user "$TMP" bash -c 'exit 23')
+t 'build runner: preserves ordinary failure status' '23' "$?"
+(BUILD_UID=0; run_as_build_user "$TMP" bash -c 'exit 0')
+t 'build runner: preserves success' '0' "$?"
+(
+  BUILD_UID=123 BUILD_GID=123 BUILD_HOME="$TMP"
+  # The privilege boundary cannot be exercised without root in unit tests.
+  setpriv() { shift 3; "$@"; }
+  run_as_build_user "$TMP" bash -c 'exit 137'
+)
+t 'build runner: non-root branch preserves failure status' '137' "$?"
+
 # ------------------------------------------- nginx config paths ----
 # Generated paths must point at the release symlink, not a flat directory.
 OPT_WEBROOT="$TMP/www"

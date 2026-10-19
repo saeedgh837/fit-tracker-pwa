@@ -45,13 +45,15 @@ jobs:
           df -h / | tail -1
 
       - name: Unit tests for the installer
-        run: bash deploy/install.test.sh
+        run: |
+          bash deploy/install.test.sh
+          bash deploy/memory.test.sh
 
       - name: Shellcheck
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -s bash deploy/install.sh deploy/install.test.sh
+          shellcheck -s bash deploy/install.sh deploy/install.test.sh deploy/memory.test.sh
 
       - name: Install (HTTP only, real apt + nginx)
         run: |
