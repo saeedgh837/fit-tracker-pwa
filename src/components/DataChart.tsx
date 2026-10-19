@@ -39,6 +39,8 @@ export default function DataChart({
 }: Props) {
   const id = useId().replaceAll(':', '');
   const color = (s: ChartSeries, i: number) => s.color ?? `var(--series-${Math.min(i + 1, 3)})`;
+  const dash = (s: ChartSeries, i: number) =>
+    s.dashed || i === 1 ? '5 4' : i === 2 ? '2 4' : undefined;
   return (
     <figure aria-label={title} className="min-w-0 m-0">
       <div className="chart-wrap" style={{ height }} aria-hidden="true">
@@ -59,7 +61,7 @@ export default function DataChart({
                 <line x1="0" y1="0" x2="0" y2="6" stroke="var(--ink)" strokeWidth="1" />
               </pattern>
             </defs>
-            <CartesianGrid stroke="var(--chart-grid)" vertical={false} strokeDasharray="3 5" />
+            <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
             <XAxis
               dataKey={xKey}
               axisLine={false}
@@ -127,7 +129,7 @@ export default function DataChart({
                   type="monotone"
                   stroke={color(s, i)}
                   strokeWidth={2}
-                  strokeDasharray={s.dashed ? '5 4' : undefined}
+                  strokeDasharray={dash(s, i)}
                   dot={
                     data.length < 14 ? { r: 4, stroke: 'var(--surface)', strokeWidth: 2 } : false
                   }
@@ -143,14 +145,17 @@ export default function DataChart({
       <figcaption className="flex flex-wrap gap-x-5 gap-y-2 justify-center mt-3 small">
         {series.map((s, i) => (
           <span key={s.key} className="row gap-2">
-            <span
-              aria-hidden="true"
-              style={{
-                width: 18,
-                borderTop: `${s.type === 'bar' ? 6 : 3}px ${s.dashed ? 'dashed' : 'solid'} ${color(s, i)}`,
-                borderRadius: 2,
-              }}
-            />
+            <svg width="24" height="10" aria-hidden="true">
+              <line
+                x1="0"
+                y1="5"
+                x2="24"
+                y2="5"
+                stroke={color(s, i)}
+                strokeWidth={s.type === 'bar' ? 6 : 2}
+                strokeDasharray={s.type === 'bar' ? undefined : dash(s, i)}
+              />
+            </svg>
             {s.label}
           </span>
         ))}

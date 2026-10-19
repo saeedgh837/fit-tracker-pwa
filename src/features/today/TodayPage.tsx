@@ -123,7 +123,7 @@ export default function TodayPage() {
         <Card className="hero-card">
           <div className="row justify-between gap-4 h-full">
             <div className="flex flex-col items-start gap-3">
-              <span className="row small text-teal-50">
+              <span className="row small hero-secondary">
                 <Sparkles size={18} aria-hidden="true" />
                 قدم‌های امروز
               </span>
@@ -139,7 +139,7 @@ export default function TodayPage() {
               </p>
               <Link
                 to="/habits"
-                className="row rounded-xl bg-white/15 px-4 py-2 min-h-11 text-sm mt-1"
+                className="row hero-action rounded-xl px-4 py-2 min-h-11 text-sm mt-1"
               >
                 ادامهٔ چک‌لیست
                 <ChevronLeft size={17} aria-hidden="true" />
@@ -147,12 +147,19 @@ export default function TodayPage() {
             </div>
             <div className="hero-ring">
               <svg viewBox="0 0 144 144" className="w-full h-full" aria-hidden="true">
-                <circle cx="72" cy="72" r="62" stroke="#ffffff25" strokeWidth="9" fill="none" />
                 <circle
                   cx="72"
                   cy="72"
                   r="62"
-                  stroke="#a1f1dc"
+                  stroke="var(--hero-track)"
+                  strokeWidth="9"
+                  fill="none"
+                />
+                <circle
+                  cx="72"
+                  cy="72"
+                  r="62"
+                  stroke="var(--hero-progress)"
                   strokeWidth="9"
                   fill="none"
                   strokeLinecap="round"
@@ -170,7 +177,7 @@ export default function TodayPage() {
                   {n(completion.percent)}
                   <span className="text-xl">٪</span>
                 </strong>
-                <span className="text-xs text-teal-100">یک روز، یک مسیر</span>
+                <span className="text-xs hero-secondary">یک روز، یک مسیر</span>
               </div>
             </div>
           </div>
@@ -213,7 +220,7 @@ export default function TodayPage() {
         </Card>
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <Card className="stack">
+        <Card className="stack dashboard-tint tone-orange">
           <div className="row justify-between">
             <h2 className="row">
               <span className="tone-icon tone-orange">
@@ -255,7 +262,7 @@ export default function TodayPage() {
             ))}
           </div>
         </Card>
-        <Card className="stack">
+        <Card className="stack dashboard-tint tone-blue">
           <div className="row justify-between">
             <h2 className="row">
               <span className="tone-icon tone-blue">
@@ -294,7 +301,7 @@ export default function TodayPage() {
             </Button>
           </div>
         </Card>
-        <Card className="stack">
+        <Card className="stack dashboard-tint tone-violet">
           <div className="row justify-between">
             <h2 className="row">
               <span className="tone-icon tone-violet">
@@ -352,7 +359,7 @@ export default function TodayPage() {
                 >
                   <span className="row">
                     <span
-                      className={`w-6 h-6 rounded-lg border grid place-items-center ${done ? 'bg-[var(--primary)] border-[var(--primary)] text-white' : 'border-[var(--muted)]'}`}
+                      className={`w-6 h-6 rounded-lg border grid place-items-center ${done ? 'bg-[var(--primary)] border-[var(--primary)] text-[var(--on-primary)]' : 'border-[var(--muted)]'}`}
                     >
                       {done && <Check size={17} aria-hidden="true" />}
                     </span>
@@ -428,7 +435,12 @@ export default function TodayPage() {
               className="absolute w-2 h-4 rounded-sm"
               style={{
                 left: `${(i * 37) % 100}%`,
-                background: ['#087f80', '#2a78d6', '#eb6834', '#a1e5cf'][i % 4],
+                background: [
+                  'var(--primary)',
+                  'var(--rose)',
+                  'var(--hero-progress)',
+                  'var(--teal)',
+                ][i % 4],
               }}
               initial={{ y: -20, rotate: 0, opacity: 1 }}
               animate={{ y: '100vh', rotate: i % 2 ? 350 : -300, opacity: 0 }}

@@ -204,6 +204,11 @@
   color: var(--ink);
   font-size: 0.8rem;
 }
+.habit-day-choice,
+.habit-choice,
+.habit-color-choice {
+  border-color: var(--control-line);
+}
 .habit-color-dot {
   height: 16px;
   width: 16px;
@@ -263,13 +268,11 @@
   background: var(--surface-soft);
 }
 .habit-heat-partial {
-  background: color-mix(in srgb, var(--primary) 30%, var(--surface));
-}
-:root[data-theme='dark'] .habit-heat-full {
-  background: color-mix(in srgb, var(--primary) 40%, var(--surface));
+  background: var(--heat-partial);
 }
 .habit-heat-full {
-  background: color-mix(in srgb, var(--primary) 70%, var(--surface));
+  background: var(--heat-full);
+  color: var(--on-heat-full);
 }
 .habit-heat-cell[aria-pressed='true'] {
   box-shadow: inset 0 0 0 2px var(--ink);

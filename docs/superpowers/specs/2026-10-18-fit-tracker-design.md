@@ -4,7 +4,7 @@
 Build the complete mobile-first personal fitness checklist requested on 2026-10-18. No backend, accounts, telemetry, external fonts or remote health-data services. Public repository contains code and synthetic demo data only. User explicitly authorized autonomous decisions, public repository creation, commits, push and GitHub Pages deployment, and requested no questions.
 
 ## Product decisions
-- Persian product name: همگام. Calm teal identity (#087f80), glacier background (#f2f7fa), navy text (#16324a), blue charts (#2a78d6) with orange trend (#eb6834). White light surfaces and blue-slate dark surfaces. Vazirmatn self-hosted.
+- Persian product name: همگام. Cobalt identity (#255cdb) with amber and coral accents, page #f5f7fc, ink #18243d, chart series cobalt/coral/teal. White light surfaces and navy dark surfaces. Vazirmatn self-hosted. (Palette revised 2026-10-19; see docs/color-system.md.)
 - Five bottom tabs: Today, Checklist, Health, Reports, Settings. Health has Weight, Diet, Exercise and Journal subroutes; every module has a direct hash link.
 - Large quiet cards, a distinctive orbit-style daily completion panel, meaningful activity icons, persistent date navigation, accessible bottom sheets, obvious save/delete controls, data tables alongside charts, reduced-motion support.
 - Store local calendar dates as YYYY-MM-DD and canonical kg/cm, convert units at display/input boundaries. Use Intl Persian calendar for display, ISO date inputs for reliable native entry. Default week starts Saturday.

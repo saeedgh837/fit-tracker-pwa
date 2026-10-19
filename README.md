@@ -200,7 +200,7 @@ npm test
 - Persian UI, full RTL, self-hosted Vazirmatn font (no CDN), Jalali calendar by default with Gregorian switch, Persian or Latin digits, Saturday week start, kg/lb and cm/in units.
 - 3-step onboarding computing Mifflin-St Jeor BMR/TDEE, macro targets, a safe calorie floor and a maximum pace of 1% body weight per week.
 - Today dashboard, customizable habits with streaks and a calendar heatmap, weight with a 7-day moving average and goal projection, four-meal nutrition with a custom food library, workouts with MET calorie estimates, routines, steps, personal records, sleep, mood, local progress photos, journal, reports with badges, and a full settings screen.
-- Themeable design system with light and dark tokens, chart palette validated for color-vision accessibility, minimum 44px touch targets, and reduced-motion support.
+- Themeable design system with light and dark tokens; cobalt, coral and teal chart series validated for normal, protan and deutan color vision (tritan separation is weaker, so dashes, legends and data tables carry identity too); minimum 44px touch targets and reduced-motion support. See [docs/color-system.md](docs/color-system.md).
 - JSON backup/restore validated by Zod schemas and applied in a single IndexedDB transaction, plus CSV export hardened against formula injection.
 
 ### Stack

@@ -71,7 +71,7 @@ export default function Onboarding() {
   }
   return (
     <div className="min-h-dvh grid lg:grid-cols-2 max-w-[1440px] mx-auto">
-      <aside className="hidden lg:flex flex-col justify-between p-16 text-white bg-gradient-to-bl from-[#087f80] to-[#154c68] min-h-dvh">
+      <aside className="onboarding-art hidden lg:flex flex-col justify-between p-16 min-h-dvh">
         <div className="row text-3xl font-bold">
           <Activity size={37} aria-hidden="true" />
           همگام
@@ -82,7 +82,7 @@ export default function Onboarding() {
             <div className="absolute w-20 h-20 rounded-full bg-white/15 grid place-items-center">
               <Sprout size={43} aria-hidden="true" />
             </div>
-            <div className="absolute end-1 top-10 w-14 h-14 rounded-2xl bg-white text-[#087f80] grid place-items-center rotate-12">
+            <div className="absolute end-1 top-10 w-14 h-14 rounded-2xl bg-white text-[var(--hero-start)] grid place-items-center rotate-12">
               <Check size={28} aria-hidden="true" />
             </div>
           </div>
@@ -91,11 +91,11 @@ export default function Onboarding() {
             <br />
             حالِ بهتر.
           </h1>
-          <p className="text-lg text-teal-100 leading-loose">
+          <p className="text-lg hero-secondary leading-loose">
             عادت‌ها، غذا و حرکت را کنار هم ببینید. مسیر خودتان را بسازید، نه یک روز بی‌نقص را.
           </p>
         </div>
-        <p className="row text-sm text-teal-100">
+        <p className="row text-sm hero-secondary">
           <LockKeyhole size={18} aria-hidden="true" />
           بدون حساب کاربری. اطلاعات روی دستگاه می‌ماند.
         </p>
