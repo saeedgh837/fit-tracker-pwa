@@ -1,39 +1,39 @@
 #!/usr/bin/env bash
 #
-# همگام | نصب‌کنندهٔ خودکار روی Ubuntu/Debian با nginx و TLS
+# Hamgam | automated installer for Ubuntu/Debian with nginx and TLS
 #
-# استفادهٔ سریع:
+# Quick start:
 #   sudo bash deploy/install.sh
 #
-# حالت غیرتعاملی (برای CI یا نصب مجدد):
+# Non-interactive (for CI or re-installs):
 #   sudo bash deploy/install.sh --non-interactive \
 #     --domain fit.example.com --email me@example.com --yes
 #
-# به‌روزرسانی یک نصب موجود:
+# Update an existing install:
 #   sudo bash deploy/install.sh --update
 #
-# بازگردانی به نسخهٔ قبلی:
+# Roll back to the previous release:
 #   sudo bash deploy/install.sh --rollback
 #
-# ── ساختار استقرار ─────────────────────────────────────────────────────────
-# فایل‌ها هرگز مستقیم روی نسخهٔ زنده کپی نمی‌شوند. هر اجرا یک نسخهٔ کامل و
-# مستقل می‌سازد و در پایان یک پیوند نمادین به‌صورت اتمیک جابه‌جا می‌شود:
+# -- Deployment layout -----------------------------------------------------
+# Files are never copied onto the live release. Each run builds a complete,
+# independent release and, at the end, swaps a symlink atomically:
 #
-#   <webroot>/releases/20261019-010203-a1b2c3d   ← نسخهٔ کامل
-#   <webroot>/current -> releases/...            ← پیوند اتمیک (ریشهٔ nginx)
-#   <webroot>/.previous                          ← نسخهٔ پیشین، برای بازگردانی
+#   <webroot>/releases/20261019-010203-a1b2c3d   <- a complete release
+#   <webroot>/current -> releases/...            <- atomic symlink (nginx root)
+#   <webroot>/.previous                          <- previous release, for rollback
 #
-# این کار یعنی هیچ‌وقت نسخهٔ نیمه‌کپی‌شده روی سایت نیست، تب‌های باز نسخهٔ قبلی
-# هم فایل‌های هش‌دار قدیمی را از دست نمی‌دهند (asset های نسخهٔ پیشین در نسخهٔ
-# تازه نگه داشته می‌شوند) و اگر تست سلامت شکست بخورد، خودکار به نسخهٔ پیشین
-# بازگردانده می‌شود.
+# So a half-copied tree is never live, tabs still running the previous
+# release keep resolving its hashed assets (they are carried into the new
+# release), and the previous release remains available for manual rollback.
+# Unexpected command failures after a swap also attempt an automatic rollback.
 #
-# اجرای دوبارهٔ اسکریپت بی‌خطر و idempotent است.
+# Re-running the script reuses existing settings and services.
 
 set -Eeuo pipefail
 
 readonly SCRIPT_VERSION='2.0.0'
-readonly APP_NAME='همگام'
+readonly APP_NAME='Hamgam'
 readonly REPO_URL_DEFAULT='https://github.com/saeedgh837/fit-tracker-pwa.git'
 readonly CONF_DIR='/etc/hamgam'
 readonly CONF_FILE="$CONF_DIR/install.conf"
@@ -47,8 +47,8 @@ readonly NODE_MAJOR='22'
 readonly RELEASES_KEEP=3
 readonly TOTAL_STEPS=10
 
-# ---------------------------------------------------------------- رنگ‌ها ----
-# فقط وقتی رنگ می‌دهیم که خروجی یک ترمینال واقعی باشد و NO_COLOR تنظیم نشده باشد.
+# -------------------------------------------------------------- colors ----
+# Colour only when writing to a real terminal and NO_COLOR is unset.
 if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != 'dumb' ]]; then
   C_RESET=$'\033[0m'
   C_BOLD=$'\033[1m'
@@ -63,23 +63,12 @@ else
 fi
 readonly C_RESET C_BOLD C_DIM C_RED C_GREEN C_YELLOW C_CYAN C_TEAL
 
-readonly PERSIAN_DIGITS=(۰ ۱ ۲ ۳ ۴ ۵ ۶ ۷ ۸ ۹)
 
-# fa <عدد لاتین>: ارقام فارسی، برای متن‌های فارسی داخل پیام‌ها.
-fa() {
-  local input=$1 out='' i ch
-  for ((i = 0; i < ${#input}; i++)); do
-    ch=${input:i:1}
-    if [[ $ch =~ [0-9] ]]; then out+="${PERSIAN_DIGITS[$ch]}"; else out+="$ch"; fi
-  done
-  printf '%s' "$out"
-}
-
-# ------------------------------------------------------------ چاپ و لاگ ----
+# ------------------------------------------------------- printing & log ----
 LOG_READY=0
-# از همان ابتدا به /dev/null اشاره می‌کند تا اگر هر خطی پیش از init_log اجرا
-# شد، ریدایرکت‌های «2>>$LOG_PATH» بی‌خطر باشند؛ اگر نبود، شکست ریدایرکت خودش
-# با set -e اسکریپت را می‌کشت، نه فقط لاگ را.
+# Points at /dev/null from the start so any line that runs before init_log can
+# still use the 2>>$LOG_PATH redirections. Without this, a failed redirect
+# would kill the script under set -e, not just lose the log line.
 LOG_PATH=/dev/null
 init_log() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
@@ -89,7 +78,7 @@ init_log() {
   fi
   if [[ $LOG_READY -eq 1 ]]; then
     {
-      printf 'همگام installer v%s | %s\n' "$SCRIPT_VERSION" "$(date -Is)"
+      printf 'Hamgam installer v%s | %s\n' "$SCRIPT_VERSION" "$(date -Is)"
       printf 'command: %s\n\n' "$*"
     } >>"$LOG_PATH"
   fi
@@ -109,13 +98,19 @@ bad() { ui_out "${C_RED}  ✗${C_RESET} $*"; }
 
 hr() { ui_out "${C_DIM}  ────────────────────────────────────────────────────────────${C_RESET}"; }
 
+panel_row() {
+  local color=$1 text=$2 row
+  printf -v row '  %-56s' "$text"
+  ui_out "${color}   │${row}│${C_RESET}"
+}
+
 banner() {
   ui_out ''
   ui_out "${C_TEAL}${C_BOLD}   ╭──────────────────────────────────────────────────────────╮${C_RESET}"
-  ui_out "${C_TEAL}${C_BOLD}   │${C_RESET}  ${C_BOLD}${APP_NAME}${C_RESET}  ${C_DIM}نصب‌کنندهٔ سرور${C_RESET}                                   ${C_TEAL}${C_BOLD}│${C_RESET}"
-  ui_out "${C_TEAL}${C_BOLD}   │${C_RESET}  ${C_DIM}برنامهٔ سلامت روزانه · بدون سرور داده · آفلاین${C_RESET}          ${C_TEAL}${C_BOLD}│${C_RESET}"
+  panel_row "${C_TEAL}${C_BOLD}" "$APP_NAME  server installer"
+  panel_row "$C_TEAL" 'Daily health app / local browser data / offline'
   ui_out "${C_TEAL}${C_BOLD}   ╰──────────────────────────────────────────────────────────╯${C_RESET}"
-  ui_out "${C_DIM}    نسخهٔ نصب‌کننده $(fa "$SCRIPT_VERSION") · لاگ: $LOG_FILE${C_RESET}"
+  ui_out "${C_DIM}    installer v$SCRIPT_VERSION / log: $LOG_FILE${C_RESET}"
   ui_out ''
 }
 
@@ -123,43 +118,43 @@ STEP_INDEX=0
 step() {
   STEP_INDEX=$((STEP_INDEX + 1))
   ui_out ''
-  ui_out "${C_CYAN}${C_BOLD}  ▸ گام $(fa "$STEP_INDEX") از $(fa "$TOTAL_STEPS"): $*${C_RESET}"
+  ui_out "${C_CYAN}${C_BOLD}  > step $STEP_INDEX of $TOTAL_STEPS: $*${C_RESET}"
   hr
 }
 
 die() {
   bad "$*"
   ui_out ''
-  ui_out "${C_RED}${C_BOLD}  نصب متوقف شد.${C_RESET}"
-  ui_out "  ${C_DIM}نسخهٔ زندهٔ سایت دست‌نخورده است؛ اگر جابه‌جایی نسخه انجام شده بود، خودکار بازگردانده می‌شود.${C_RESET}"
-  if [[ $LOG_READY -eq 1 ]]; then ui_out "  ${C_DIM}لاگ کامل: $LOG_FILE${C_RESET}"; fi
+  ui_out "${C_RED}${C_BOLD}  Installation stopped.${C_RESET}"
+  ui_out "  ${C_DIM}Review the live release before retrying. Use --rollback to restore the previous release if needed.${C_RESET}"
+  if [[ $LOG_READY -eq 1 ]]; then ui_out "  ${C_DIM}full log: $LOG_FILE${C_RESET}"; fi
   exit 1
 }
 
 on_error() {
   local code=$1 line=$2 cmd=$3
 
-  # داخل یک زیرپوسته (مثلاً $(...) در آرگومان یک دستور) فراخوانی می‌شویم.
-  # آن‌جا die فقط همان زیرپوسته را می‌بندد و اسکریپت اصلی ادامه می‌دهد؛ پس
-  # نباید پیام «نصب متوقف شد» چاپ کنیم، وگرنه کاربر فکر می‌کند نصب شکست خورده
-  # در حالی که ادامه یافته است. به‌جایش یک هشدار صریح می‌دهیم.
+  # We are inside a subshell (a command substitution in an argument list).
+  # There, die only closes that subshell and the main script carries on, so
+  # printing the "Installation stopped" banner would be a lie. Report it
+  # plainly instead of claiming the install stopped when it did not.
   if [[ ${BASH_SUBSHELL:-0} -gt 0 ]]; then
-    bad "یک دستور کمکی در زیرپوسته شکست خورد (کد $(fa "$code")): $cmd"
+    bad "A helper command failed inside a subshell (exit $code): $cmd"
     log "SUBSHELL ERROR line $line: $cmd (exit $code)"
     return 0
   fi
 
-  bad "دستور زیر با کد $(fa "$code") شکست خورد"
-  note "خط $(fa "$line"): $cmd"
+  bad "Command failed with exit code $code"
+  note "line $line: $cmd"
   if [[ ${SWAP_DONE:-0} -eq 1 ]]; then
-    warn 'نسخهٔ تازه فعال شده بود؛ بازگردانی به نسخهٔ پیشین…'
+    warn 'The new release was already live; rolling back to the previous one...'
     rollback_deploy || true
   fi
-  die 'جزئیات در لاگ ثبت شد.'
+  die 'Details were written to the log.'
 }
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
-# ------------------------------------------------------------ آرگومان‌ها ----
+# ----------------------------------------------------------- arguments ----
 NON_INTERACTIVE=0
 ASSUME_YES=0
 UPDATE_ONLY=0
@@ -180,35 +175,35 @@ OPT_KEEP_DEFAULT_SITE=0
 
 usage() {
   cat <<'USAGE'
-همگام | نصب‌کنندهٔ سرور
+Hamgam | server installer
 
-  sudo bash deploy/install.sh [گزینه‌ها]
+  sudo bash deploy/install.sh [options]
 
-گزینه‌ها:
-  --domain <name>        دامنهٔ اصلی، مثل fit.example.com
-  --email <address>      ایمیل برای Let's Encrypt
-  --extra-hosts <list>   دامنه‌های اضافی با کاما، مثل www.example.com,fit.example.com
+Options:
+  --domain <name>        primary domain, e.g. fit.example.com
+  --email <address>      address for Let's Encrypt
+  --extra-hosts <list>   extra domains, comma separated
   --source <git|local|prebuilt>
-                           git: clone و build روی سرور (پیش‌فرض)
-                           local: از همین مخزن محلی build کن
-                           prebuilt: از پوشهٔ dist آماده deploy کن
-  --git-url <url>        نشانی مخزن برای حالت git
-  --git-ref <ref>        شاخه یا تگ (پیش‌فرض main)
-  --dist <path>          پوشهٔ dist آماده، برای حالت prebuilt
-  --webroot <path>       مسیر نگهداری نسخه‌ها (پیش‌فرض /var/www/hamgam)
-  --repo-dir <path>      مسیر کلون مخزن (پیش‌فرض /opt/hamgam)
+                           git: clone and build on the server (default)
+                           local: build from this working copy
+                           prebuilt: deploy an existing dist directory
+  --git-url <url>        repository URL for the git source
+  --git-ref <ref>        branch or tag (default main)
+  --dist <path>          dist directory, for the prebuilt source
+  --webroot <path>       where releases are kept (default /var/www/hamgam)
+  --repo-dir <path>      clone directory (default /opt/hamgam)
   --cf-credentials <file>
-                           فایل مجوز Cloudflare برای گرفتن گواهی با DNS-01.
-                           وقتی دامنه پشت پروکسی Cloudflare است لازم می‌شود.
-                           قالب فایل: dns_cloudflare_api_token = <توکن>
-  --keep-default-site    کانفیگ پیش‌فرض nginx را دست نزن (پیش‌فرض: پرسیده می‌شود)
-  --no-csp               هدر Content-Security-Policy را نگذار
-  --skip-tls             گواهی SSL نصب نکن، فقط HTTP (حالت آزمایشی)
-  --non-interactive      هیچ سؤالی نپرس؛ فقط با گزینه‌های داده‌شده کار کن
-  --update               نصب موجود را به‌روزرسانی کن (فقط سورس و استقرار)
-  --rollback             به نسخهٔ پیشین بازگردان
-  --yes                  تأییدهای تأییدی را خودکار بپذیر
-  --help                 همین راهنما
+                           Cloudflare credentials for a DNS-01 certificate.
+                           Needed when the domain sits behind the Cloudflare
+                           proxy. File format: dns_cloudflare_api_token = <token>
+  --keep-default-site    leave the default nginx site alone (default: ask)
+  --no-csp               do not send a Content-Security-Policy header
+  --skip-tls             no certificate, HTTP only (testing mode)
+  --non-interactive      ask nothing, use only the given options
+  --update               update an existing install (source and deploy only)
+  --rollback             roll back to the previous release
+  --yes                  accept confirmation prompts
+  --help                 this help
 USAGE
 }
 
@@ -233,15 +228,15 @@ parse_args() {
       --rollback) ROLLBACK_ONLY=1; shift ;;
       --yes | -y) ASSUME_YES=1; shift ;;
       --help | -h) usage; exit 0 ;;
-      *) die "گزینهٔ ناشناخته: $1 (با --help راهنما را ببینید)" ;;
+      *) die "Unknown option: $1 (run with --help for usage)" ;;
     esac
   done
 }
 
-# -------------------------------------------------------- ابزارهای کمکی ----
+# ------------------------------------------------------------- helpers ----
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# اجرای دستور با ثبت کامل خروجی در لاگ.
+# Run a command, recording its whole output in the log.
 run_logged() {
   log "run: $*"
   if [[ $LOG_READY -eq 1 ]]; then
@@ -258,22 +253,22 @@ run_logged() {
   return 0
 }
 
-# انتظار برای آزاد شدن قفل apt؛ روی سرور تازه ممکن است unattended-upgrades
-# در حال کار باشد و بدون این کار نصب بسته‌ها شکست می‌خورد.
+# Wait for the apt lock to clear. On a fresh server unattended-upgrades may
+# be running, and installing packages without waiting fails.
 wait_for_apt() {
   local waited=0 limit=300
   while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ||
     fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
     if [[ $waited -eq 0 ]]; then
-      warn 'مدیر بسته‌ها مشغول است (احتمالاً به‌روزرسانی خودکار). کمی صبر می‌کنیم…'
+      warn 'The package manager is busy (probably an automatic update). Waiting...'
     fi
     sleep 5
     waited=$((waited + 5))
     if [[ $waited -ge $limit ]]; then
-      die 'قفل apt پس از ۵ دقیقه آزاد نشد. دستور unattended-upgrades را بررسی کنید.'
+      die 'The apt lock did not clear within 5 minutes. Check unattended-upgrades.'
     fi
   done
-  if [[ $waited -gt 0 ]]; then ok 'قفل apt آزاد شد.'; fi
+  if [[ $waited -gt 0 ]]; then ok 'The apt lock cleared.'; fi
   return 0
 }
 
@@ -284,7 +279,7 @@ apt_install() {
 }
 
 ask_value() {
-  # ask_value <نام متغیر> <برچسب> <پیش‌فرض> <الگوی اعتبارسنجی> <پیام خطا>
+  # ask_value <variable> <label> <default> <validation pattern> <error message>
   local __var=$1 label=$2 default=$3 pattern=$4 errmsg=$5 input=''
   while true; do
     if [[ -n $default ]]; then
@@ -292,10 +287,10 @@ ask_value() {
     else
       ui_out "${C_BOLD}  $label${C_RESET}"
     fi
-    read -r -p "  › " input || die 'ورودی خوانده نشد.'
+    read -r -p "  › " input || die 'Could not read input.'
     input=${input:-$default}
     if [[ -z $input ]]; then
-      bad 'این مقدار لازم است.'
+      bad 'This value is required.'
       continue
     fi
     if [[ -n $pattern && ! $input =~ $pattern ]]; then
@@ -308,7 +303,7 @@ ask_value() {
 }
 
 ask_yes_no() {
-  # ask_yes_no <برچسب> <پیش‌فرض y|n>
+  # ask_yes_no <label> <default y|n>
   local label=$1 default=${2:-n} input='' hint
   if [[ $ASSUME_YES -eq 1 ]]; then return 0; fi
   if [[ $NON_INTERACTIVE -eq 1 ]]; then
@@ -319,41 +314,41 @@ ask_yes_no() {
   [[ $default == y ]] && hint='Y/n'
   while true; do
     ui_out "${C_BOLD}  $label${C_RESET} ${C_DIM}($hint)${C_RESET}"
-    read -r -p "  › " input || die 'ورودی خوانده نشد.'
+    read -r -p "  › " input || die 'Could not read input.'
     input=${input:-$default}
     case ${input,,} in
-      y | yes | بله | آره) return 0 ;;
-      n | no | خیر | نه) return 1 ;;
-      *) bad 'لطفاً y یا n بنویسید.' ;;
+      y | yes) return 0 ;;
+      n | no) return 1 ;;
+      *) bad 'Please answer y or n.' ;;
     esac
   done
 }
 
-# --------------------------------------------------------- اعتبارسنجی‌ها ----
+# ---------------------------------------------------------- validation ----
 VALID_DOMAIN_RE='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
 VALID_EMAIL_RE='^[^@[:space:]]+@([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
 
 valid_path() { [[ $1 == /* && $1 != *..* && ${#1} -lt 200 ]]; }
 
-# محافظ حیاتی: هرگز اجازه نمی‌دهیم مسیری که پاک می‌شود ریشه یا پوشهٔ سیستمی باشد.
+# Critical guard: never let the path being pruned be a system or root path.
 guard_webroot() {
   local p=${1:-}
-  [[ -n $p ]] || die 'مسیر انتشار خالی است.'
-  valid_path "$p" || die "مسیر انتشار نامعتبر است: $p"
+  [[ -n $p ]] || die 'The web root is empty.'
+  valid_path "$p" || die "Invalid web root: $p"
   case $p in
     / | /etc | /etc/* | /usr | /usr/* | /bin | /bin/* | /sbin | /sbin/* | \
       /lib | /lib/* | /lib64 | /lib64/* | /boot | /boot/* | /dev | /dev/* | \
       /proc | /proc/* | /sys | /sys/* | /root | /root/* | /var | /home | /opt | /srv)
-      die "مسیر انتشار برای این کار مناسب نیست: $p"
+      die "Unsafe web root for this operation: $p"
       ;;
   esac
   local depth
   depth=$(awk -F/ '{print NF-1}' <<<"$p")
   if [[ $depth -lt 2 ]]; then
-    die "مسیر انتشار باید حداقل دو سطح داشته باشد (مثل /var/www/hamgam): $p"
+    die "The web root needs at least two levels (like /var/www/hamgam): $p"
   fi
   if [[ -e $p && ! -d $p ]]; then
-    die "مسیر انتشار یک پوشه نیست: $p"
+    die "The web root is not a directory: $p"
   fi
   return 0
 }
@@ -364,32 +359,32 @@ acquire_lock() {
   [[ -d $dir ]] || dir=/tmp
   if ! exec 9>"$dir/hamgam-install.lock" 2>/dev/null; then
     if ! exec 9>/tmp/hamgam-install.lock 2>/dev/null; then
-      warn 'قفل فایل ساخته نشد؛ بدون قفل ادامه می‌دهیم.'
+      warn 'Could not create the lock file; continuing without a lock.'
       return 0
     fi
   fi
   if ! flock -w 300 9; then
-    die 'اجرای دیگری از این نصب‌کننده در حال کار است. چند دقیقه بعد دوباره تلاش کنید.'
+    die 'Another run of this installer is in progress. Try again in a few minutes.'
   fi
   return 0
 }
 
-# -------------------------------------------------------------پیش‌نیازها ----
+# ------------------------------------------------------- prerequisites ----
 need_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     plain ''
-    plain "  ${C_YELLOW}این اسکریپت برای نصب بسته‌ها و تنظیم nginx به دسترسی root نیاز دارد.${C_RESET}"
-    plain "  ${C_DIM}همین حالا با sudo دوباره اجرا می‌شود؛ ممکن است رمز عبور بپرسد.${C_RESET}"
+    plain "  ${C_YELLOW}This script needs root to install packages and configure nginx.${C_RESET}"
+    plain "  ${C_DIM}Re-running under sudo now; it may ask for your password.${C_RESET}"
     plain ''
     if ! have sudo; then
-      die 'sudo نصب نیست. اسکریپت را با کاربر root اجرا کنید.'
+      die 'sudo is not installed. Run the script as root.'
     fi
     exec sudo -E bash "$0" "$@"
   fi
 }
 
-# nginx نصب‌شده از snap یا مسیر غیربستهٔ apt با این نصب‌کننده سازگار نیست؛
-# باید پیش از هر تغییری تشخیص داده شود، نه بعد از نصب نسخهٔ apt.
+# An nginx from snap or outside the apt package is not compatible with this
+# installer, so it is detected before anything is changed.
 detect_foreign_nginx() {
   have nginx || return 0
   local bin
@@ -397,14 +392,14 @@ detect_foreign_nginx() {
   [[ -n $bin ]] || return 0
   case $bin in
     /snap/*)
-      die "nginx از snap نصب شده است ($bin). این نصب‌کننده فقط بستهٔ apt را مدیریت می‌کند. با «sudo snap remove nginx» حذفش کنید و دوباره اجرا کنید."
+      die "nginx is installed from snap ($bin). This installer only manages the apt package. Remove it with 'sudo snap remove nginx' and run again."
       ;;
     /usr/sbin/nginx | /usr/bin/nginx) ;;
     *)
-      warn "nginx از مسیر غیرمعمول اجرا می‌شود: $bin"
+      warn "nginx runs from an unusual path: $bin"
       if [[ $NON_INTERACTIVE -eq 0 ]]; then
-        ask_yes_no 'ادامه می‌دهیم؟ کانفیگ ممکن است در مسیر دیگری نوشته شود.' n ||
-          die 'به‌درخواست شما متوقف شد.'
+        ask_yes_no 'Continue? Configuration may be written elsewhere.' n ||
+          die 'Stopped at your request.'
       fi
       ;;
   esac
@@ -418,94 +413,94 @@ check_ports_free() {
     if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .; then
       svc=$(ss -H -ltnp "sport = :$port" 2>/dev/null | grep -oP 'users:\(\("\K[^"]+' | head -1 || true)
       if [[ $svc == nginx ]]; then continue; fi
-      busy+="${port} (${svc:-نامشخص}) "
+      busy+="${port} (${svc:-unknown}) "
     fi
   done
   if [[ -n $busy ]]; then
-    bad "پورت‌های زیر در اختیار سرویس دیگری هستند: $busy"
-    note 'اگر Apache یا سرویس دیگری روی این پورت‌ها است، اول آن را متوقف کنید:'
+    bad "These ports are held by another service: $busy"
+    note 'If Apache or another service owns these ports, stop it first:'
     note '  sudo systemctl stop apache2 && sudo systemctl disable apache2'
-    die 'پورت‌های لازم آزاد نیستند.'
+    die 'The required ports are not free.'
   fi
-  ok 'پورت‌های ۸۰ و ۴۴۳ آزادند'
+  ok 'Ports 80 and 443 are free'
   return 0
 }
 
 preflight() {
-  step 'بررسی سیستم و پیش‌نیازها'
+  step 'Checking the system and prerequisites'
 
   if [[ ! -r /etc/os-release ]]; then
-    die 'فایل /etc/os-release پیدا نشد؛ سیستم‌عامل پشتیبانی نمی‌شود.'
+    die '/etc/os-release not found; this OS is not supported.'
   fi
   # shellcheck disable=SC1091
   . /etc/os-release
   local id=${ID:-unknown} ver=${VERSION_ID:-0}
   case $id in
     ubuntu | debian) ;;
-    *) die "این نصب‌کننده برای Ubuntu و Debian نوشته شده است؛ سیستم فعلی: $id" ;;
+    *) die "This installer targets Ubuntu and Debian. Current system: $id" ;;
   esac
-  ok "سیستم: ${PRETTY_NAME:-$id $ver}"
+  ok "System: ${PRETTY_NAME:-$id $ver}"
   log "os: $PRETTY_NAME arch: $(uname -m)"
 
   local arch
   arch=$(uname -m)
   if [[ $arch != x86_64 && $arch != aarch64 && $arch != arm64 ]]; then
-    warn "معماری $arch آزمایش‌نشده است؛ ادامه می‌دهیم."
+    warn "Architecture $arch is untested; continuing anyway."
   fi
 
   if ! [[ $ver =~ ^[0-9]+ ]]; then
-    warn "نسخهٔ سیستم‌عامل خوانده نشد ($ver)؛ ادامه می‌دهیم."
+    warn "Could not read the OS version ($ver); continuing anyway."
   elif [[ $id == ubuntu && ${ver%%.*} -lt 22 ]]; then
-    warn "اوبونتو $(fa "$ver") قدیمی است؛ پیشنهاد می‌شود ۲۲٫۰۴ یا بالاتر."
+    warn "Ubuntu $ver is old; 22.04 or newer is recommended."
   fi
 
   detect_foreign_nginx
   check_ports_free
 
-  # فضای دیسک: سورس + node_modules + dist حدود ۱ گیگابایت لازم دارد.
+  # Disk space: source, node_modules and dist need about 1 GB.
   local avail_kb
   avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
   if [[ -n $avail_kb && $avail_kb -lt 1500000 ]]; then
-    die "فضای دیسک کافی نیست: $(fa "$((avail_kb / 1024))") مگابایت آزاد است، حداقل ۱۵۰۰ مگابایت لازم است."
+    die "Not enough disk space: $((avail_kb / 1024)) MB free, at least 1500 MB is required."
   fi
-  ok "فضای دیسک: $(fa "$((avail_kb / 1024 / 1024))") گیگابایت آزاد"
+  ok "Disk space: $((avail_kb / 1024 / 1024)) GB free"
 
-  # اینترنت و DNS
+  # Network and DNS
   if ! getent hosts deb.debian.org >/dev/null 2>&1 && ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
-    die 'اتصال به مخازن بسته‌ها برقرار نشد. اینترنت یا DNS سرور را بررسی کنید.'
+    die 'Could not reach the package repositories. Check the network and DNS on this server.'
   fi
-  ok 'دسترسی به مخازن بسته‌ها برقرار است'
+  ok 'Package repositories are reachable'
 
-  # ابزارهای پایه‌ای که خود اسکریپت لازم دارد.
+  # Base tools the script itself needs.
   local missing=() tool
   for tool in curl ca-certificates; do
     dpkg -s "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    note "نصب ابزارهای پایه: ${missing[*]}"
-    if ! run_logged apt-get update -qq; then die 'apt-get update ناموفق بود.'; fi
-    apt_install "${missing[@]}" || die 'نصب ابزارهای پایه ناموفق بود.'
+    note "Installing base tools: ${missing[*]}"
+    if ! run_logged apt-get update -qq; then die 'apt-get update failed.'; fi
+    apt_install "${missing[@]}" || die 'Installing base tools failed.'
   fi
-  ok 'ابزارهای پایه موجودند'
+  ok 'Base tools are present'
 
-  # هشدار حافظه: build روی سرور ۱ گیگابایتی می‌تواند OOM شود.
+  # Memory warning: building on a 1 GB server can run out of memory.
   local mem_mb swap_mb
   mem_mb=$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
   swap_mb=$(awk '/^SwapTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
   log "mem: ${mem_mb}MB swap: ${swap_mb}MB"
   if [[ -n $mem_mb && $mem_mb -lt 1500 && $swap_mb -lt 512 ]]; then
-    warn "حافظهٔ سرور کم است (RAM $(fa "$mem_mb") مگابایت، swap $(fa "$swap_mb") مگابایت)."
-    note 'ساخت روی سرور ممکن است ناکام بماند. پیشنهاد می‌شود با --source prebuilt از خروجی CI استفاده کنید،'
-    note 'یا اول swap بسازید: sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile'
+    warn "This server has little memory (RAM $mem_mb MB, swap $swap_mb MB)."
+    note 'Building on the server may fail. Prefer --source prebuilt with an artifact from CI,'
+    note 'or create swap first: sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile'
   fi
   return 0
 }
 
-# ------------------------------------------------------------ تنظیمات -------
+# ---------------------------------------------------------- settings -------
 load_saved_conf() {
   [[ -r $CONF_FILE ]] || return 1
-  # مقادیر قبلی پاک می‌شوند تا اگر فایل تنظیمات کلیدی را نداشت، مقدار قدیمی
-  # باقی نماند و به‌جای خطای روشن، بی‌صدا با مقدار کهنه ادامه ندهیم.
+  # Clear previous values first, so a key missing from the config file cannot
+  # silently leave a stale value behind instead of failing loudly.
   # shellcheck disable=SC2034
   CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
   CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP=''
@@ -521,21 +516,21 @@ validate_extra_hosts() {
   for h in "${hosts[@]}"; do
     h=$(printf '%s' "$h" | xargs)
     if [[ -n $h && ! $h =~ $VALID_DOMAIN_RE ]]; then
-      die "دامنهٔ اضافی نامعتبر است: $h"
+      die "Invalid extra domain: $h"
     fi
   done
   return 0
 }
 
 collect_config() {
-  step 'دریافت تنظیمات'
+  step 'Collecting settings'
 
   if [[ $UPDATE_ONLY -eq 1 || $ROLLBACK_ONLY -eq 1 ]]; then
-    load_saved_conf || die "نصب قبلی پیدا نشد ($CONF_FILE). بدون --update/--rollback دوباره اجرا کنید."
-    ok "تنظیمات نصب قبلی خوانده شد: $CFG_DOMAIN"
-    # همهٔ مقادیر ذخیره‌شده بازگردانده می‌شوند، نه فقط مسیرها؛ وگرنه در حالت
-    # به‌روزرسانی OPT_SOURCE خالی می‌ماند و مرحلهٔ ساخت اصلاً اجرا نمی‌شود.
-    # مقدار صریح خط فرمان بر مقدار ذخیره‌شده اولویت دارد.
+    load_saved_conf || die "No previous install found ($CONF_FILE). Run again without --update/--rollback."
+    ok "Read the previous install's settings: $CFG_DOMAIN"
+    # Restore every saved value, not just the paths. Otherwise an update leaves
+    # OPT_SOURCE empty and the build step never runs at all.
+    # An explicit command-line value wins over the saved one.
     OPT_DOMAIN=${OPT_DOMAIN:-$CFG_DOMAIN}
     OPT_EMAIL=${OPT_EMAIL:-$CFG_EMAIL}
     OPT_SOURCE=${OPT_SOURCE:-$CFG_SOURCE}
@@ -544,18 +539,18 @@ collect_config() {
     OPT_WEBROOT=${OPT_WEBROOT:-$CFG_WEBROOT}
     OPT_REPO_DIR=${OPT_REPO_DIR:-$CFG_REPO_DIR}
     OPT_EXTRA_HOSTS=${OPT_EXTRA_HOSTS:-${CFG_EXTRA_HOSTS:-}}
-    # اگر خط فرمان --no-csp نداده و قبلاً هم خاموش شده بود، همان می‌ماند.
+    # If --no-csp was not given and CSP was already off, it stays off.
     if [[ $OPT_ENABLE_CSP -eq 1 && ${CFG_ENABLE_CSP:-1} -eq 0 ]]; then
       OPT_ENABLE_CSP=0
     fi
     if [[ -z ${OPT_DOMAIN:-} ]]; then
-      die "تنظیمات ذخیره‌شده ناقص است ($CONF_FILE). نصب تازه اجرا کنید."
+      die "The saved settings are incomplete ($CONF_FILE). Run a fresh install."
     fi
     guard_webroot "$OPT_WEBROOT"
     return 0
   fi
 
-  # مقادیر از خط فرمان بر تنظیمات ذخیره‌شده اولویت دارند.
+  # Command-line values take priority over saved settings.
   if load_saved_conf; then
     OPT_DOMAIN=${OPT_DOMAIN:-$CFG_DOMAIN}
     OPT_EMAIL=${OPT_EMAIL:-$CFG_EMAIL}
@@ -565,7 +560,7 @@ collect_config() {
     OPT_WEBROOT=${OPT_WEBROOT:-$CFG_WEBROOT}
     OPT_REPO_DIR=${OPT_REPO_DIR:-$CFG_REPO_DIR}
     OPT_EXTRA_HOSTS=${OPT_EXTRA_HOSTS:-$CFG_EXTRA_HOSTS}
-    warn 'نصب قبلی روی این سرور پیدا شد؛ مقادیر قبلی پیشنهاد می‌شوند.'
+    warn 'A previous install was found on this server; its values are suggested.'
   fi
 
   OPT_SOURCE=${OPT_SOURCE:-git}
@@ -575,71 +570,71 @@ collect_config() {
 
   if [[ $NON_INTERACTIVE -eq 1 ]]; then
     if [[ -z $OPT_DOMAIN || -z $OPT_EMAIL ]]; then
-      die 'در حالت غیرتعاملی، --domain و --email اجباری هستند.'
+      die '--domain and --email are required in non-interactive mode.'
     fi
   else
     plain ''
-    plain "  ${C_DIM}برای ادامه چند مقدار لازم است. هر کدام را می‌توانید با Enter بپذیرید.${C_RESET}"
-    ask_value OPT_DOMAIN 'دامنهٔ سایت (بدون https)' "$OPT_DOMAIN" "$VALID_DOMAIN_RE" \
-      'دامنه معتبر نیست. نمونهٔ درست: fit.example.com'
-    ask_value OPT_EMAIL 'ایمیل برای گواهی SSL' "$OPT_EMAIL" "$VALID_EMAIL_RE" \
-      'ایمیل معتبر نیست. نمونهٔ درست: me@example.com'
-    ask_value OPT_WEBROOT 'مسیر نگهداری نسخه‌ها' "$OPT_WEBROOT" '' ''
-    ask_value OPT_SOURCE 'حالت تأمین سورس (git/local/prebuilt)' "$OPT_SOURCE" '^(git|local|prebuilt)$' \
-      'یکی از سه مقدار git یا local یا prebuilt را بنویسید.'
+    plain "  ${C_DIM}A few values are needed. Press Enter to accept any default.${C_RESET}"
+    ask_value OPT_DOMAIN 'Site domain (without https)' "$OPT_DOMAIN" "$VALID_DOMAIN_RE" \
+      'Not a valid domain. Example: fit.example.com'
+    ask_value OPT_EMAIL 'Email for the SSL certificate' "$OPT_EMAIL" "$VALID_EMAIL_RE" \
+      'Not a valid email. Example: me@example.com'
+    ask_value OPT_WEBROOT 'Directory that holds the releases' "$OPT_WEBROOT" '' ''
+    ask_value OPT_SOURCE 'Source mode (git/local/prebuilt)' "$OPT_SOURCE" '^(git|local|prebuilt)$' \
+      'Enter one of git, local or prebuilt.'
     if [[ $OPT_SOURCE == git ]]; then
-      ask_value OPT_GIT_URL 'نشانی مخزن گیت' "$OPT_GIT_URL" '^(https?://|git@|/).+' \
-        'نشانی مخزن معتبر نیست.'
-      ask_value OPT_GIT_REF 'شاخه یا تگ' "$OPT_GIT_REF" '' ''
-      ask_value OPT_REPO_DIR 'مسیر نگهداری مخزن روی سرور' "$OPT_REPO_DIR" '' ''
+      ask_value OPT_GIT_URL 'Git repository URL' "$OPT_GIT_URL" '^(https?://|git@|/).+' \
+        'Not a valid repository URL.'
+      ask_value OPT_GIT_REF 'Branch or tag' "$OPT_GIT_REF" '' ''
+      ask_value OPT_REPO_DIR 'Directory that holds the clone on this server' "$OPT_REPO_DIR" '' ''
     elif [[ $OPT_SOURCE == prebuilt ]]; then
-      ask_value OPT_DIST 'مسیر پوشهٔ dist آماده' "${OPT_DIST:-}" '' ''
+      ask_value OPT_DIST 'Path to the ready dist directory' "${OPT_DIST:-}" '' ''
     fi
   fi
 
-  # اعتبارسنجی نهایی، مستقل از اینکه مقدار از کجا آمده است.
-  [[ $OPT_DOMAIN =~ $VALID_DOMAIN_RE ]] || die "دامنهٔ نامعتبر: $OPT_DOMAIN"
-  [[ $OPT_EMAIL =~ $VALID_EMAIL_RE ]] || die "ایمیل نامعتبر: $OPT_EMAIL"
+  # Final validation, regardless of where each value came from.
+  [[ $OPT_DOMAIN =~ $VALID_DOMAIN_RE ]] || die "Invalid domain: $OPT_DOMAIN"
+  [[ $OPT_EMAIL =~ $VALID_EMAIL_RE ]] || die "Invalid email: $OPT_EMAIL"
   guard_webroot "$OPT_WEBROOT"
-  valid_path "$OPT_REPO_DIR" || die "مسیر مخزن نامعتبر: $OPT_REPO_DIR"
+  valid_path "$OPT_REPO_DIR" || die "Invalid clone path: $OPT_REPO_DIR"
   validate_extra_hosts
   case $OPT_SOURCE in
     git)
-      [[ -n $OPT_GIT_URL ]] || die 'برای حالت git، نشانی مخزن لازم است.'
-      [[ -n $OPT_GIT_REF ]] || die 'برای حالت git، شاخه لازم است.'
+      [[ -n $OPT_GIT_URL ]] || die 'The git source needs a repository URL.'
+      [[ -n $OPT_GIT_REF ]] || die 'The git source needs a branch.'
       ;;
     local)
       [[ -f ${PWD}/package.json ]] ||
-        die "در مسیر فعلی package.json پیدا نشد. اسکریپت را از ریشهٔ مخزن اجرا کنید."
+        die "No package.json in the current directory. Run the script from the repository root."
       ;;
     prebuilt)
-      [[ -n ${OPT_DIST:-} && -d ${OPT_DIST:-} ]] || die "پوشهٔ dist پیدا نشد: ${OPT_DIST:-خالی}"
+      [[ -n ${OPT_DIST:-} && -d ${OPT_DIST:-} ]] || die "dist directory not found: ${OPT_DIST:-empty}"
       ;;
-    *) die "حالت سورس نامعتبر: $OPT_SOURCE" ;;
+    *) die "Invalid source mode: $OPT_SOURCE" ;;
   esac
 
   if [[ -n $OPT_CF_CREDENTIALS && ! -r $OPT_CF_CREDENTIALS ]]; then
-    die "فایل مجوز Cloudflare خوانده نشد: $OPT_CF_CREDENTIALS"
+    die "Could not read the Cloudflare credentials: $OPT_CF_CREDENTIALS"
   fi
 
-  # نمایش خلاصه و تأیید
+  # Summary and confirmation
   if [[ $NON_INTERACTIVE -eq 0 ]]; then
     ui_out ''
     hr
-    plain "  ${C_BOLD}خلاصهٔ نصب${C_RESET}"
-    plain "    دامنهٔ سایت      ${C_BOLD}$OPT_DOMAIN${C_RESET}"
-    plain "    ایمیل گواهی      $OPT_EMAIL"
-    plain "    حالت سورس        $OPT_SOURCE"
+    plain "  ${C_BOLD}Install summary${C_RESET}"
+    plain "    Site domain      ${C_BOLD}$OPT_DOMAIN${C_RESET}"
+    plain "    Certificate mail $OPT_EMAIL"
+    plain "    Source mode      $OPT_SOURCE"
     if [[ $OPT_SOURCE == git ]]; then
-      plain "    مخزن             $OPT_GIT_URL ($OPT_GIT_REF)"
-      plain "    مسیر مخزن        $OPT_REPO_DIR"
+      plain "    Repository       $OPT_GIT_URL ($OPT_GIT_REF)"
+      plain "    Clone directory  $OPT_REPO_DIR"
     fi
-    plain "    مسیر انتشار      $OPT_WEBROOT"
-    plain "    پوشهٔ نسخه‌ها     $OPT_WEBROOT/releases"
-    if [[ $OPT_SKIP_TLS -eq 1 ]]; then plain "    گواهی SSL        نصب نمی‌شود ${C_DIM}(--skip-tls)${C_RESET}"; fi
-    if [[ $OPT_ENABLE_CSP -eq 0 ]]; then plain "    هدر CSP          غیرفعال ${C_DIM}(--no-csp)${C_RESET}"; fi
+    plain "    Web root         $OPT_WEBROOT"
+    plain "    Releases         $OPT_WEBROOT/releases"
+    if [[ $OPT_SKIP_TLS -eq 1 ]]; then plain "    SSL certificate  not installed ${C_DIM}(--skip-tls)${C_RESET}"; fi
+    if [[ $OPT_ENABLE_CSP -eq 0 ]]; then plain "    CSP header       disabled ${C_DIM}(--no-csp)${C_RESET}"; fi
     hr
-    ask_yes_no 'با این مقادیر ادامه می‌دهیم؟' y || die 'به‌درخواست شما متوقف شد.'
+    ask_yes_no 'Continue with these values?' y || die 'Stopped at your request.'
   fi
   return 0
 }
@@ -648,7 +643,7 @@ save_config() {
   mkdir -p "$CONF_DIR"
   chmod 700 "$CONF_DIR"
   cat >"$CONF_FILE" <<EOF
-# تنظیمات نصب همگام؛ این فایل توسط deploy/install.sh نوشته شده است.
+# Hamgam install settings; written by deploy/install.sh.
 CFG_DOMAIN='${OPT_DOMAIN}'
 CFG_EMAIL='${OPT_EMAIL}'
 CFG_SOURCE='${OPT_SOURCE}'
@@ -660,18 +655,18 @@ CFG_EXTRA_HOSTS='${OPT_EXTRA_HOSTS}'
 CFG_ENABLE_CSP='${OPT_ENABLE_CSP}'
 EOF
   chmod 600 "$CONF_FILE"
-  ok "تنظیمات ذخیره شد: $CONF_FILE"
+  ok "Settings saved: $CONF_FILE"
   return 0
 }
 
-# ------------------------------------------------------ نصب پیش‌نیازها -----
+# ----------------------------------------------------- installing deps -----
 install_packages() {
-  step 'نصب بسته‌های موردنیاز'
+  step 'Installing required packages'
 
   wait_for_apt
-  note 'به‌روزرسانی فهرست بسته‌ها…'
-  run_logged apt-get update -qq || die 'apt-get update ناموفق بود. منابع مخازن را بررسی کنید.'
-  ok 'فهرست بسته‌ها به‌روز شد'
+  note 'Refreshing the package index...'
+  run_logged apt-get update -qq || die 'apt-get update failed. Check the repository sources.'
+  ok 'Package index refreshed'
 
   local packages=(nginx curl git rsync ca-certificates openssl gnupg dnsutils)
   local missing=() p
@@ -680,45 +675,45 @@ install_packages() {
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    note "نصب: ${missing[*]}"
-    apt_install "${missing[@]}" || die 'نصب بسته‌های پایه ناموفق بود.'
+    note "Installing: ${missing[*]}"
+    apt_install "${missing[@]}" || die 'Installing base packages failed.'
   fi
-  ok 'nginx و ابزارهای پایه نصب شدند'
+  ok 'nginx and the base tools are installed'
 
-  # بعد از نصب هم دوباره بررسی می‌کنیم که nginx از snap نیامده باشد.
+  # Check once more after installing, in case nginx came from snap.
   detect_foreign_nginx
 
   if [[ $OPT_SKIP_TLS -eq 0 ]]; then
     if ! dpkg -s python3-certbot-nginx >/dev/null 2>&1; then
-      note 'نصب certbot برای گواهی SSL رایگان…'
+      note 'Installing certbot for a free SSL certificate...'
       if ! apt_install python3-certbot-nginx; then
-        warn 'نصب certbot ناموفق بود؛ ادامه می‌دهیم تا علت را در پایان گزارش کنیم.'
+        warn 'Installing certbot failed; carrying on so the reason is reported at the end.'
         OPT_SKIP_TLS=1
       fi
     fi
-    if [[ $OPT_SKIP_TLS -eq 0 ]]; then ok 'certbot آماده است'; fi
+    if [[ $OPT_SKIP_TLS -eq 0 ]]; then ok 'certbot is ready'; fi
 
     if [[ -n $OPT_CF_CREDENTIALS ]] && ! dpkg -s python3-certbot-dns-cloudflare >/dev/null 2>&1; then
-      note 'نصب افزونهٔ DNS کلادفلر برای certbot…'
+      note 'Installing the Cloudflare DNS plugin for certbot...'
       apt_install python3-certbot-dns-cloudflare ||
-        warn 'نصب افزونهٔ Cloudflare ناموفق بود.'
+        warn 'Installing the Cloudflare plugin failed.'
     fi
   fi
 
-  # Node فقط وقتی لازم است که روی سرور build کنیم.
+  # Node is only needed when building on the server.
   if [[ $OPT_SOURCE == git || $OPT_SOURCE == local ]]; then
     local have_node=0 major=''
     if have node; then
       major=$(node -v | sed 's/^v\([0-9]*\).*/\1/')
       if [[ $major =~ ^[0-9]+$ && $major -ge 20 ]]; then
         have_node=1
-        ok "Node.js موجود است: $(node -v)"
+        ok "Node.js already present: $(node -v)"
       else
-        warn "نسخهٔ Node.js قدیمی است ($(node -v))؛ نسخهٔ $(fa "$NODE_MAJOR") نصب می‌شود."
+        warn "Node.js is old ($(node -v)); installing version $NODE_MAJOR."
       fi
     fi
     if [[ $have_node -eq 0 ]]; then
-      note "نصب Node.js $(fa "$NODE_MAJOR") LTS از NodeSource…"
+      note "Installing Node.js $NODE_MAJOR LTS from NodeSource..."
       install_node
     fi
     ok "npm: $(npm -v)"
@@ -730,24 +725,24 @@ install_node() {
   local keyring=/usr/share/keyrings/nodesource.gpg
   wait_for_apt
   mkdir -p /usr/share/keyrings
-  # کلید امضای NodeSource؛ اگر دریافت نشد، نصب ادامه نمی‌یابد چون مخزن
-  # بدون کلید قابل اعتماد نیست.
+  # The NodeSource signing key. If it cannot be fetched, the install stops:
+  # a repository without its key cannot be trusted.
   if ! curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
     gpg --dearmor -o "$keyring" 2>>"$LOG_PATH"; then
-    die 'دریافت کلید امضای NodeSource ناموفق بود. اتصال به deb.nodesource.com را بررسی کنید.'
+    die 'Could not fetch the NodeSource signing key. Check access to deb.nodesource.com.'
   fi
   chmod 644 "$keyring"
   echo "deb [signed-by=$keyring] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
     >/etc/apt/sources.list.d/nodesource.list
-  run_logged apt-get update -qq || die 'apt-get update پس از افزودن مخزن NodeSource ناموفق بود.'
-  apt_install nodejs || die 'نصب Node.js ناموفق بود.'
-  have node || die 'Node.js پس از نصب هم در PATH نیست.'
+  run_logged apt-get update -qq || die 'apt-get update failed after adding the NodeSource repository.'
+  apt_install nodejs || die 'Installing Node.js failed.'
+  have node || die 'Node.js is still not on PATH after installing.'
   return 0
 }
 
-# --------------------------------------------------- کاربر ساخت (غیرریشه) --
-# اجرای npm ci و build با کاربر ریشه یعنی lifecycle scriptهای وابستگی‌ها هم
-# دسترسی root می‌گیرند. این کار را نمی‌پذیریم.
+# -------------------------------------------- build user (non-root) --
+# Running npm ci and the build as root would give dependency lifecycle
+# scripts root as well. That is not acceptable.
 BUILD_USER=''
 BUILD_UID=0
 BUILD_GID=0
@@ -764,19 +759,20 @@ pick_build_user() {
   fi
 
   if [[ -z $candidate || $candidate == root ]]; then
-    warn 'کاربر غیرریشه‌ای برای ساخت پیدا نشد؛ ساخت با root انجام می‌شود.'
+    warn 'No non-root user available to build with; building as root.'
     return 0
   fi
   BUILD_USER=$candidate
   BUILD_UID=$(id -u "$BUILD_USER")
   BUILD_GID=$(id -g "$BUILD_USER")
-  ok "ساخت برنامه با کاربر ${BUILD_USER} انجام می‌شود (نه root)"
+  ok "Building as ${BUILD_USER} (not root)"
   return 0
 }
 
-# اجرای دستور با کاربر ساخت، داخل مسیر داده‌شده.
-# نکته: setpriv یک برنامهٔ واقعی اجرا می‌کند، پس اینجا نمی‌توان run_logged را
-# صدا زد (تابع شل در فرایند جدید وجود ندارد)؛ خودمان خروجی را به لاگ می‌فرستیم.
+# Run a command as the build user, inside the given directory.
+# Note: setpriv execs a real program, so run_logged cannot be called here
+# (a shell function does not exist in the new process); the output is
+# redirected to the log directly.
 run_as_build_user() {
   local dir=$1
   shift
@@ -786,7 +782,7 @@ run_as_build_user() {
 
   if [[ $BUILD_UID -eq 0 ]] || ! have setpriv; then
     if [[ $BUILD_UID -ne 0 ]]; then
-      warn 'setpriv موجود نیست؛ ساخت با root انجام می‌شود.'
+      warn 'setpriv is not available; building as root.'
     fi
     if ! (cd "$dir" && "$@") >>"$out" 2>&1; then
       log "FAILED: $*"
@@ -806,12 +802,12 @@ run_as_build_user() {
   return 0
 }
 
-# --------------------------------------------------- سورس و ساخت ----------
+# ----------------------------------------------------- source & build ----------
 BUILD_DIR=''
 BUILD_ID='manual'
 
 fetch_and_build() {
-  step 'آماده‌سازی سورس و ساخت برنامه'
+  step 'Preparing the source and building'
 
   case $OPT_SOURCE in
     git) fetch_git ;;
@@ -819,29 +815,29 @@ fetch_and_build() {
     prebuilt) use_prebuilt ;;
   esac
 
-  [[ -n $BUILD_DIR && -d $BUILD_DIR ]] || die 'پوشهٔ خروجی ساخت پیدا نشد.'
+  [[ -n $BUILD_DIR && -d $BUILD_DIR ]] || die 'Build output directory not found.'
   validate_build "$BUILD_DIR"
-  ok 'خروجی نهایی آماده است'
+  ok 'The final output is ready'
   return 0
 }
 
 fetch_git() {
   local dir=$OPT_REPO_DIR
   if [[ -d $dir/.git ]]; then
-    note "به‌روزرسانی مخزن موجود در $dir"
+    note "Updating the existing clone in $dir"
     run_logged git -C "$dir" fetch --depth 1 origin "$OPT_GIT_REF" ||
-      die "دریافت شاخهٔ $OPT_GIT_REF ناموفق بود."
-    run_logged git -C "$dir" checkout -f FETCH_HEAD || die 'جابه‌جایی به نسخهٔ تازه ناموفق بود.'
+      die "Could not fetch branch $OPT_GIT_REF."
+    run_logged git -C "$dir" checkout -f FETCH_HEAD || die 'Could not move to the fetched revision.'
     git -C "$dir" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
   else
-    note "کلون مخزن در $dir"
+    note "Cloning into $dir"
     rm -rf "$dir"
     mkdir -p "$(dirname "$dir")"
     run_logged git clone --depth 1 --branch "$OPT_GIT_REF" "$OPT_GIT_URL" "$dir" ||
-      die "کلون مخزن ناموفق بود. دسترسی به $OPT_GIT_URL را بررسی کنید."
+      die "Clone failed. Check access to $OPT_GIT_URL."
   fi
   BUILD_ID=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || printf 'nogit')
-  ok "سورس آماده است: $BUILD_ID"
+  ok "Source ready: $BUILD_ID"
   build_project "$dir"
 }
 
@@ -849,21 +845,21 @@ fetch_local() {
   local dir
   dir=$(readlink -f "$PWD")
   BUILD_ID=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || printf 'nogit')
-  ok "استفاده از مخزن محلی: $dir"
+  ok "Using the local working copy: $dir"
   build_project "$dir"
 }
 
 build_project() {
   local dir=$1
-  [[ -f $dir/package.json ]] || die "package.json در $dir پیدا نشد."
+  [[ -f $dir/package.json ]] || die "No package.json in $dir."
   if [[ ! -f $dir/package-lock.json ]]; then
-    warn 'package-lock.json نیست؛ نصب با npm install انجام می‌شود.'
+    warn 'No package-lock.json; falling back to npm install.'
   fi
 
   pick_build_user
 
-  # مخزن کلون‌شده را به کاربر ساخت می‌دهیم تا npm بتواند بنویسد؛ در حالت
-  # مخزن محلی دست نمی‌زنیم چون مالکیت خود کاربر است.
+  # Hand the cloned repository to the build user so npm can write to it. For a
+  # local working copy, ownership is left alone.
   if [[ $OPT_SOURCE == git && $BUILD_UID -ne 0 ]]; then
     chown -R "$BUILD_UID:$BUILD_GID" "$dir"
   fi
@@ -873,57 +869,58 @@ build_project() {
   if [[ $BUILD_UID -ne 0 ]]; then chown "$BUILD_UID:$BUILD_GID" "$BUILD_HOME"; fi
   chmod 700 "$BUILD_HOME"
 
-  note 'نصب وابستگی‌ها (ممکن است چند دقیقه طول بکشد)…'
+  note 'Installing dependencies (this can take a few minutes)...'
   local mem_mb extra_env=()
   mem_mb=$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)
   if [[ -n $mem_mb && $mem_mb -lt 1500 ]]; then
-    # سقف heap تضمین جلوگیری از OOM نیست، اما فشار روی حافظه را کم می‌کند.
+    # A heap cap does not guarantee against OOM, but it eases memory pressure.
     extra_env=(env NODE_OPTIONS=--max-old-space-size=512)
-    note 'سرور کم‌حافظه است؛ سقف حافظهٔ Node محدود شد.'
+    note 'This server has little memory; capping the Node heap.'
   fi
 
   if [[ -f $dir/package-lock.json ]]; then
     run_as_build_user "$dir" "${extra_env[@]}" npm ci --no-audit --no-fund ||
-      die 'npm ci ناموفق بود. لاگ کامل را ببینید.'
+      die 'npm ci failed. See the full log.'
   else
     run_as_build_user "$dir" "${extra_env[@]}" npm install --no-audit --no-fund ||
-      die 'npm install ناموفق بود.'
+      die 'npm install failed.'
   fi
-  ok 'وابستگی‌ها نصب شدند'
+  ok 'Dependencies installed'
 
-  note 'ساخت نسخهٔ تولید…'
-  # APP_BASE=/ چون این نصب روی ریشهٔ دامنه سرو می‌شود.
+  note 'Building the production bundle...'
+  # APP_BASE=/ because this install is served from the domain root.
   if ! run_as_build_user "$dir" "${extra_env[@]}" env APP_BASE=/ npm run build; then
-    die 'ساخت برنامه شکست خورد. با اجرای دستی npm run build علت را ببینید.'
+    die 'The build failed. Run npm run build by hand to see why.'
   fi
   BUILD_DIR="$dir/dist"
-  ok 'ساخت با موفقیت انجام شد'
+  ok 'Build finished'
   return 0
 }
 
 use_prebuilt() {
   BUILD_DIR=$(readlink -f "$OPT_DIST")
-  ok "استفاده از خروجی آماده: $BUILD_DIR"
+  ok "Using the ready output: $BUILD_DIR"
   return 0
 }
 
-# بررسی خروجی پیش از هر تغییری روی سایت. وجود سه فایل کافی نیست: باید مطمئن
-# شویم build با ریشهٔ درست انجام شده و سرویس‌ورکر با همین فایل‌ها ساخته شده است.
+# Validate the output before touching the site. The three files existing is
+# not enough: the build must have used the right base, and the service worker
+# must have been generated from these files.
 validate_build() {
   local dir=$1 f
   local required=(index.html manifest.webmanifest sw.js)
   for f in "${required[@]}"; do
-    [[ -f $dir/$f ]] || die "فایل ضروری در خروجی ساخت نیست: $f"
+    [[ -f $dir/$f ]] || die "Required file missing from the build: $f"
   done
 
   if ! grep -q 'id="root"' "$dir/index.html"; then
-    die 'index.html ساختار این برنامه را ندارد (id="root" پیدا نشد).'
+    die 'index.html is not from this app (no id="root" found).'
   fi
 
-  # اگر با APP_BASE اشتباه ساخته شده باشد، مسیرها زیرپوشه‌ای می‌شوند و روی
-  # دامنهٔ ریشه همه‌چیز ۴۰۴ می‌شود.
+  # A build with the wrong APP_BASE points at a subpath, and on a domain root
+  # every one of those requests 404s.
   if grep -qE '(src|href)="[^"]*/fit-tracker-pwa/' "$dir/index.html"; then
-    die 'این خروجی برای GitHub Pages ساخته شده (مسیرها زیر /fit-tracker-pwa/). دوباره با APP_BASE=/ بسازید.'
+    die 'This build targets GitHub Pages (paths under /fit-tracker-pwa/). Rebuild with APP_BASE=/.'
   fi
 
   local refs a
@@ -934,24 +931,24 @@ validate_build() {
     [[ -n $a ]] || continue
     total_assets=$((total_assets + 1))
     [[ -f $dir${a} ]] || {
-      bad "فایل ارجاع‌شده در index.html پیدا نشد: $a"
+      bad "A file referenced by index.html is missing: $a"
       missing_assets=$((missing_assets + 1))
     }
   done <<<"$refs"
   if [[ $total_assets -eq 0 ]]; then
-    die 'هیچ فایل asset ای در index.html ارجاع نشده؛ خروجی ساخت ناقص است.'
+    die 'index.html references no assets; the build output is incomplete.'
   fi
   [[ $missing_assets -eq 0 ]] ||
-    die "$(fa "$missing_assets") فایل ارجاع‌شده در خروجی ساخت وجود ندارد."
+    die "$missing_assets file(s) referenced by index.html are missing from the build."
 
   if ! grep -q 'precacheAndRoute\|workbox' "$dir/sw.js"; then
-    die 'sw.js سرویس‌ورکر این برنامه نیست (نشانهٔ workbox پیدا نشد).'
+    die 'sw.js is not the service worker for this app (no workbox marker).'
   fi
-  ok "خروجی ساخت معتبر است ($(fa "$total_assets") فایل asset بررسی شد)"
+  ok "Build output is valid ($total_assets assets checked)"
   return 0
 }
 
-# ------------------------------------------------------------- استقرار -----
+# -------------------------------------------------------------- deploy -----
 SITE_ROOT=''
 RELEASES_DIR=''
 CURRENT_LINK=''
@@ -967,11 +964,11 @@ init_paths() {
 }
 
 write_if_changed() {
-  # write_if_changed <مسیر>: محتوا از stdin خوانده می‌شود.
-  # کد خروج ۰ یعنی فایل تغییر کرد، ۱ یعنی محتوا یکسان بود.
+  # write_if_changed <path>: content is read from stdin.
+  # Exit 0 means the file changed, 1 means the content was identical.
   local target=$1 tmp
   tmp=$(mktemp -t hamgam-wic.XXXXXX) || {
-    warn "ساخت فایل موقت ناموفق بود؛ $target بدون مقایسه نوشته می‌شود."
+    warn "Could not create a temp file; writing $target without comparing."
     mkdir -p "$(dirname "$target")"
     cat >"$target"
     return 0
@@ -994,8 +991,8 @@ current_release() {
   return 0
 }
 
-# نسخهٔ پیشین فایل‌های هش‌دار را در نسخهٔ تازه نگه می‌داریم تا تب‌هایی که هنوز
-# نسخهٔ قدیمی را اجرا می‌کنند، هنگام بارگذاری یک chunk قدیمی ۴۰۴ نگیرند.
+# Carry the previous release's hashed assets into the new one, so a tab
+# still running the old version does not 404 when it loads an old chunk.
 merge_previous_assets() {
   local new_dir=$1 prev_dir=$2
   [[ -n $prev_dir && -d $prev_dir/assets && -d $new_dir/assets ]] || return 0
@@ -1007,17 +1004,17 @@ merge_previous_assets() {
     if cp -p "$f" "$new_dir/assets/$base" 2>>"$LOG_PATH"; then
       kept=$((kept + 1))
     else
-      warn "نگه‌داشتن فایل قدیمی ناموفق بود: $base"
+      warn "Could not keep the old file: $base"
     fi
   done
   if [[ $kept -gt 0 ]]; then
-    note "$(fa "$kept") فایل هش‌دار نسخهٔ پیشین نگه داشته شد"
+    note "$kept hashed file(s) from the previous release were kept"
   fi
   return 0
 }
 
-# پوشهٔ سایت در نسخه‌های قدیمی اسکریپت تخت بود؛ پیش از استقرار جدید، آن را
-# به یک نسخهٔ مستقل تبدیل می‌کنیم تا چیزی گم نشود.
+# Older versions of this script deployed a flat directory. Convert it into
+# a release first, so nothing is lost.
 migrate_legacy_layout() {
   [[ -d $SITE_ROOT ]] || return 0
   [[ -e $CURRENT_LINK ]] && return 0
@@ -1025,27 +1022,26 @@ migrate_legacy_layout() {
 
   local legacy
   legacy="$RELEASES_DIR/legacy-$(date +%Y%m%d-%H%M%S)"
-  note 'چیدمان قدیمی سایت پیدا شد؛ به ساختار نسخه‌دار منتقل می‌شود.'
+  note 'Found the old flat layout; moving it into the release layout.'
   mkdir -p "$legacy"
   local entry
   for entry in "$SITE_ROOT"/* "$SITE_ROOT"/.[!.]*; do
     [[ -e $entry ]] || continue
     [[ $entry == "$RELEASES_DIR" ]] && continue
     [[ $entry == "$CURRENT_LINK" ]] && continue
-    mv "$entry" "$legacy/" || die "انتقال $entry ناموفق بود."
+    mv "$entry" "$legacy/" || die "Could not move $entry."
   done
   if [[ -f $legacy/index.html ]]; then
-    # فوراً پیوند را به همان نسخهٔ منتقل‌شده می‌دهیم؛ وگرنه بین این لحظه و
-    # جابه‌جایی نسخهٔ تازه، ریشهٔ nginx به مسیری خالی اشاره می‌کند و سایت
-    # ۴۰۴ می‌دهد.
-    atomic_swap "$legacy" || die 'ساخت پیوند نسخه پس از مهاجرت ناموفق بود.'
+    # Point the symlink at the migrated release immediately. Otherwise, between
+    # now and the swap, nginx's root points at an empty path and the site 404s.
+    atomic_swap "$legacy" || die 'Could not create the release symlink after migrating.'
     printf '%s\n' "$legacy" >"$PREVIOUS_MARK"
   fi
-  ok "چیدمان قدیمی در $legacy حفظ شد"
+  ok "The old layout was preserved in $legacy"
   return 0
 }
 
-# جابه‌جایی اتمیک پیوند: ساخت پیوند موقت و سپس rename روی مسیر نهایی.
+# Atomic symlink swap: create a temporary link, then rename it into place.
 atomic_swap() {
   local target=$1
   ln -sfn "$target" "$SITE_ROOT/.current.tmp" || return 1
@@ -1057,23 +1053,23 @@ rollback_deploy() {
   local prev=''
   [[ -r $PREVIOUS_MARK ]] && prev=$(cat "$PREVIOUS_MARK")
   if [[ -z $prev || ! -d $prev ]]; then
-    warn 'نسخهٔ پیشینی برای بازگردانی موجود نیست.'
+    warn 'There is no previous release to roll back to.'
     return 0
   fi
   if atomic_swap "$prev"; then
     SWAP_DONE=0
     systemctl reload nginx 2>/dev/null || true
-    note "سایت به نسخهٔ پیشین بازگردانده شد: $prev"
+    note "Rolled the site back to: $prev"
   else
-    warn "بازگردانی خودکار ناموفق بود. دستی اجرا کنید: ln -sfn $prev $CURRENT_LINK && systemctl reload nginx"
+    warn "Automatic rollback failed. Run by hand: ln -sfn $prev $CURRENT_LINK && systemctl reload nginx"
   fi
   return 0
 }
 
 deploy_files() {
-  step 'استقرار فایل‌های سایت'
+  step 'Deploying the site files'
 
-  have rsync || die 'rsync نصب نیست.'
+  have rsync || die 'rsync is not installed.'
   init_paths
   guard_webroot "$SITE_ROOT"
   mkdir -p "$RELEASES_DIR"
@@ -1082,7 +1078,7 @@ deploy_files() {
   stamp=$(date +%Y%m%d-%H%M%S)
   release="$RELEASES_DIR/${stamp}-${BUILD_ID}"
   if [[ -e $release ]]; then
-    die "پوشهٔ نسخه از قبل وجود دارد: $release (یک دقیقه بعد دوباره تلاش کنید)"
+    die "Release directory already exists: $release (try again in a minute)"
   fi
 
   migrate_legacy_layout
@@ -1090,18 +1086,18 @@ deploy_files() {
   local prev_release
   prev_release=$(current_release)
 
-  note "ساخت نسخهٔ تازه در $release"
+  note "Building the new release in $release"
   mkdir -p "$release"
   if ! run_logged rsync -a --chmod=D755,F644 "$BUILD_DIR/" "$release/"; then
     rm -rf "$release"
-    die 'انتقال فایل‌ها به نسخهٔ تازه ناموفق بود.'
+    die 'Copying files into the new release failed.'
   fi
 
   merge_previous_assets "$release" "$prev_release"
 
-  # نسخهٔ پیشین را برای بازگردانی ثبت می‌کنیم (پیش از جابه‌جایی). اگر نسخهٔ
-  # پیشینی نیست (نصب تازه) نشانه را پاک نمی‌کنیم؛ ممکن است نشانهٔ مهاجرت از
-  # چیدمان قدیمی باشد و باید برای بازگردانی بماند.
+  # Record the previous release for rollback, before the swap. If there is none
+  # (a fresh install) the marker is left alone: it may have been set by the
+  # legacy migration and is still needed for rollback.
   if [[ -n $prev_release ]]; then
     printf '%s\n' "$prev_release" >"$PREVIOUS_MARK"
   fi
@@ -1110,20 +1106,20 @@ deploy_files() {
   find "$release" -type d -exec chmod 755 {} +
   find "$release" -type f -exec chmod 644 {} +
 
-  # از این نقطه به بعد اگر خطایی رخ دهد، خودکار بازگردانی می‌شود.
+  # From here on, any error triggers an automatic rollback.
   SWAP_DONE=1
   atomic_swap "$release" || {
     SWAP_DONE=0
-    die 'جابه‌جایی اتمیک نسخه ناموفق بود.'
+    die 'The atomic release swap failed.'
   }
   NEED_NGINX_RELOAD=1
-  ok "نسخهٔ تازه فعال شد: $(basename "$release")"
+  ok "New release is live: $(basename "$release")"
 
   systemctl reload nginx 2>/dev/null || true
 
-  # نگه‌داشتن چند نسخهٔ آخر و پاک‌کردن بقیه. شکست در پاک‌سازی نباید نصب را
-  # متوقف کند. نکتهٔ مهم: نسخهٔ فعال و نسخه‌ای که --rollback به آن برمی‌گردد
-  # هرگز پاک نمی‌شوند، وگرنه بازگردانی به مسیر ناموجود اشاره می‌کند.
+  # Keep the newest releases and prune the rest. A failed prune must not stop
+  # the install. Important: the live release and the rollback target are never
+  # pruned, or rollback would point at a path that no longer exists.
   local old keep_current keep_previous
   keep_current=$(current_release)
   keep_previous=''
@@ -1133,24 +1129,24 @@ deploy_files() {
     [[ $old == "$RELEASES_DIR/"* ]] || continue
     [[ $old == "$keep_current" ]] && continue
     [[ $old == "$keep_previous" ]] && continue
-    rm -rf "$old" 2>/dev/null || warn "پاک‌کردن نسخهٔ قدیمی ناموفق بود: $old"
+    rm -rf "$old" 2>/dev/null || warn "Could not prune the old release: $old"
   done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null |
     sort -rn | tail -n "+$((RELEASES_KEEP + 1))" | cut -d' ' -f2-)
 
   return 0
 }
 
-# ---------------------------------------------------------- کانفیگ nginx ---
+# -------------------------------------------------------- nginx config ---
 write_headers_snippet() {
   local csp_line=''
   if [[ $OPT_ENABLE_CSP -eq 1 ]]; then
-    # style-src نیاز به unsafe-inline دارد چون Recharts و Framer Motion
-    # استایل را به‌صورت style attribute می‌نویسند. script-src امن می‌ماند.
+    # style-src needs unsafe-inline because Recharts and Framer Motion write
+    # styles as style attributes. script-src stays strict.
     csp_line='add_header Content-Security-Policy "default-src '"'"'self'"'"'; script-src '"'"'self'"'"'; style-src '"'"'self'"'"' '"'"'unsafe-inline'"'"'; img-src '"'"'self'"'"' data: blob:; font-src '"'"'self'"'"'; connect-src '"'"'self'"'"'; manifest-src '"'"'self'"'"'; worker-src '"'"'self'"'"'; object-src '"'"'none'"'"'; base-uri '"'"'self'"'"'; form-action '"'"'none'"'"'; frame-ancestors '"'"'none'"'"'" always;'
   fi
 
   if write_if_changed "$HEADERS_SNIPPET" <<EOF
-# تولیدشده توسط deploy/install.sh؛ دستی ویرایش نکنید.
+# Generated by deploy/install.sh; do not edit by hand.
 add_header X-Content-Type-Options "nosniff" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 add_header X-Frame-Options "DENY" always;
@@ -1158,22 +1154,22 @@ add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment
 $csp_line
 EOF
   then
-    note 'هدرهای امنیتی نوشته شد'
+    note 'Security headers written'
   else
-    note 'هدرهای امنیتی بی‌تغییر بودند'
+    note 'Security headers unchanged'
   fi
   return 0
 }
 
-# سیاست کش با map ساخته می‌شود. مزیتش این است که هیچ location ای add_header
-# محلی ندارد، پس همهٔ هدرهای امنیتی سطح server به ارث می‌رسند و لازم نیست
-# snippet در هر location تکرار شود. (add_header_inherit merge فقط از nginx
-# ۱٫۲۹٫۳ به بعد هست و روی اوبونتو ۲۲٫۰۴ موجود نیست.)
+# The cache policy lives in one map. That way no location has its own
+# add_header, so the server-level security headers are inherited and the
+# snippet does not need repeating in every location. (add_header_inherit
+# merge only exists from nginx 1.29.3 and is not on Ubuntu 22.04.)
 write_cache_map() {
   if write_if_changed "$CACHE_MAP" <<'EOF'
-# تولیدشده توسط deploy/install.sh؛ دستی ویرایش نکنید.
-# فایل‌های assets نام هش‌دار دارند و هرگز تغییر نمی‌کنند؛ پوستهٔ برنامه،
-# سرویس‌ورکر و مانیفست هرگز نباید کش شوند وگرنه نسخهٔ تازه به کاربر نمی‌رسد.
+# Generated by deploy/install.sh; do not edit by hand.
+# Hashed assets never change; the app shell, service worker and manifest
+# must never be cached, or a new release never reaches the user.
 map $uri $hamgam_cache {
     default                            "no-cache";
     ~^/assets/                         "public, max-age=31536000, immutable";
@@ -1185,9 +1181,9 @@ map $uri $hamgam_cache {
 }
 EOF
   then
-    note 'سیاست کش نوشته شد'
+    note 'Cache policy written'
   else
-    note 'سیاست کش بی‌تغییر بود'
+    note 'Cache policy unchanged'
   fi
   return 0
 }
@@ -1215,11 +1211,11 @@ write_site_config() {
   local server_names
   server_names=$(build_server_names)
   if write_if_changed "$NGINX_SITE" <<EOF
-# تولیدشده توسط deploy/install.sh؛ برای تغییرات پایدار این فایل را مستقیم
-# ویرایش نکنید؛ اسکریپت را دوباره اجرا کنید.
+# Generated by deploy/install.sh. For durable changes do not edit this file
+# directly; re-run the script.
 #
-# هدرهای امنیتی و سیاست کش در سطح server تعریف می‌شوند و هیچ location ای
-# add_header محلی ندارد تا ارث‌بری هدرها نشکند.
+# Security headers and the cache policy are set at server level, and no
+# location defines its own add_header, so header inheritance is not broken.
 server {
     listen 80;
     listen [::]:80;
@@ -1245,19 +1241,19 @@ server {
         default_type application/manifest+json;
     }
 
-    # فایل ناموجود زیر /assets/ باید ۴۰۴ بدهد، نه اینکه به index.html بیفتد.
-    # بقیهٔ مسیرها از location / رد می‌شوند و همان فایل را می‌گیرند.
+    # A missing file under /assets/ must 404 rather than fall through to index.html.
+    # Everything else goes through location / and gets the file it asked for.
     location /assets/ {
         access_log off;
         try_files \$uri =404;
     }
 
-    # مسیر ریشه؛ HashRouter است پس fallback فقط برای اطمینان است.
+    # Root path. HashRouter is in use, so the fallback is only a safety net.
     location / {
         try_files \$uri \$uri/ /index.html;
     }
 
-    # دسترسی به فایل‌های مخفی، به‌جز مسیر تمدید گواهی.
+    # Block dotfiles, except the certificate renewal path.
     location ~ /\.(?!well-known) {
         deny all;
     }
@@ -1275,22 +1271,22 @@ EOF
 handle_default_site() {
   [[ -e /etc/nginx/sites-enabled/default ]] || return 0
   if [[ $OPT_KEEP_DEFAULT_SITE -eq 1 ]]; then
-    note 'کانفیگ پیش‌فرض nginx دست‌نخورده ماند (--keep-default-site)'
+    note 'The default nginx site was left alone (--keep-default-site)'
     return 0
   fi
 
-  # کانفیگ پیش‌فرض واقعاً می‌تواند در استفاده باشد و حذف بی‌قید آن، سرویس
-  # دیگری را روی همین سرور قطع می‌کند. پس فقط با تأیید صریح و با امکان
-  # بازگردانی دست می‌زنیم.
-  # توجه: این کانفیگ سرویس ما را نمی‌شکند، چون server_name ما دقیق‌تر است و
-  # درخواست‌های دامنهٔ ما به آن می‌رسد؛ فقط درخواست‌های بدون Host به آن می‌رود.
-  note 'کانفیگ پیش‌فرض nginx روی پورت ۸۰ فعال است.'
-  note 'سرویس ما با آن کار می‌کند، اما اگر سرور فقط برای همین سایت است بهتر است غیرفعال شود.'
-  if ask_yes_no 'کانفیگ پیش‌فرض nginx غیرفعال شود؟ (بازگردانی: sudo ln -s ../sites-available/default /etc/nginx/sites-enabled/default)' n; then
+  # The default site may genuinely be in use, and removing it would take down
+  # another service on this server. So it is only disabled with explicit
+  # consent, and the restore command is printed.
+  # Note: it does not break our site, since our server_name is more specific;
+  # only requests with no matching Host reach it.
+  note 'The default nginx site is active on port 80.'
+  note 'Our site works alongside it, but if this server only hosts this site, disabling it is cleaner.'
+  if ask_yes_no 'Disable the default nginx site? (restore: sudo ln -s ../sites-available/default /etc/nginx/sites-enabled/default)' n; then
     rm -f /etc/nginx/sites-enabled/default
-    note 'کانفیگ پیش‌فرض غیرفعال شد'
+    note 'The default site was disabled'
   else
-    note 'کانفیگ پیش‌فرض دست‌نخورده ماند'
+    note 'The default site was left alone'
   fi
   return 0
 }
@@ -1301,24 +1297,24 @@ resolve_domain_conflicts() {
     /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | grep -v "$NGINX_SITE" || true)
   [[ -n $conflicts ]] || return 0
 
-  warn 'این دامنه از قبل در کانفیگ دیگری nginx تعریف شده است:'
+  warn 'This domain is already defined in another nginx config:'
   local c
   while IFS= read -r c; do note "$c"; done <<<"$conflicts"
   if [[ $NON_INTERACTIVE -eq 0 ]]; then
-    ask_yes_no 'آن کانفیگ غیرفعال شود تا تداخل پیش نیاید؟' y ||
-      die 'برای جلوگیری از تداخل، نصب متوقف شد.'
+    ask_yes_no 'Disable that config to avoid a conflict?' y ||
+      die 'Stopping to avoid a conflict.'
   fi
   while IFS= read -r c; do
     if [[ -L $c ]]; then
       rm -f "$c"
-      note "غیرفعال شد: $c (بازگردانی: sudo ln -s /etc/nginx/sites-available/$(basename "$c") $c)"
+      note "Disabled: $c (restore: sudo ln -s /etc/nginx/sites-available/$(basename "$c") $c)"
     fi
   done <<<"$conflicts"
   return 0
 }
 
 configure_nginx() {
-  step 'تنظیم nginx'
+  step 'Configuring nginx'
   init_paths
 
   write_headers_snippet
@@ -1328,9 +1324,9 @@ configure_nginx() {
 
   local changed=0
   if site_config_has_certbot && site_config_matches_domain; then
-    # certbot این فایل را برای HTTPS بازنویسی کرده است؛ با قالب HTTP
-    # جایگزینش نمی‌کنیم وگرنه گواهی بی‌اثر می‌شود.
-    ok 'کانفیگ فعلی توسط certbot مدیریت می‌شود؛ دست‌نخورده می‌ماند'
+    # certbot has rewritten this file for HTTPS. It is not replaced with the
+    # HTTP template, or the certificate would stop being used.
+    ok 'The current config is managed by certbot; leaving it alone'
   else
     if write_site_config; then
       changed=1
@@ -1344,60 +1340,61 @@ configure_nginx() {
 
   handle_default_site
 
-  # صحت کانفیگ باید پیش از هر reload تأیید شود.
+  # The config must validate before any reload.
   if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-    bad 'کانفیگ nginx معتبر نیست:'
+    bad 'The nginx config is not valid:'
     nginx -t 2>&1 | while IFS= read -r line; do note "$line"; done
-    die 'نصب متوقف شد و nginx دوباره بارگذاری نشد؛ نسخهٔ قبلی همچنان فعال است.'
+    die 'Stopped; nginx was not reloaded and the previous config is still active.'
   fi
-  ok 'صحت کانفیگ nginx تأیید شد'
+  ok 'nginx config validated'
 
   if [[ $changed -eq 1 || $NEED_NGINX_RELOAD -eq 1 ]]; then
     run_logged systemctl reload nginx || run_logged systemctl restart nginx ||
-      die 'بارگذاری دوبارهٔ nginx ناموفق بود.'
-    ok 'nginx بارگذاری شد'
+      die 'Reloading nginx failed.'
+    ok 'nginx reloaded'
   else
-    ok 'کانفیگ nginx بی‌تغییر بود'
+    ok 'The nginx config was unchanged'
   fi
 
   run_logged systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl is-active --quiet nginx || die 'سرویس nginx فعال نیست.'
-  ok 'سرویس nginx فعال است و در بوت بالا می‌آید'
+  systemctl is-active --quiet nginx || die 'The nginx service is not active.'
+  ok 'nginx is active and enabled at boot'
   return 0
 }
 
-# ------------------------------------------------------------ فایروال -----
+# ------------------------------------------------------------ firewall -----
 configure_firewall() {
-  step 'بررسی فایروال'
+  step 'Checking the firewall'
 
   if ! have ufw; then
-    note 'ufw نصب نیست؛ نکته‌ای برای تنظیم لازم نیست.'
+    note 'ufw is not installed; nothing to configure.'
     return 0
   fi
   if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
-    # فعال‌کردن خودکار ufw می‌تواند دسترسی SSH را قطع کند؛ هرگز این کار را
-    # بدون درخواست صریح انجام نمی‌دهیم.
-    note 'ufw غیرفعال است؛ دست نمی‌زنیم. اگر فعالش کردید، پورت‌های ۸۰ و ۴۴۳ را باز بگذارید.'
+    # Enabling ufw automatically can cut off SSH access, so we never do it
+    # without an explicit request.
+    note 'ufw is inactive; leaving it alone. If you enable it, open ports 80 and 443.'
     return 0
   fi
   if ufw status | grep -qE '^(Nginx Full|80/tcp|443/tcp)'; then
-    ok 'پورت‌های ۸۰ و ۴۴۳ در فایروال باز هستند'
+    ok 'Ports 80 and 443 are open in the firewall'
     return 0
   fi
-  note 'باز کردن پورت‌های ۸۰ و ۴۴۳ در ufw…'
+  note 'Opening ports 80 and 443 in ufw...'
   if ! run_logged ufw allow 'Nginx Full'; then
-    warn 'باز کردن پورت در ufw ناموفق بود؛ دستی بررسی کنید.'
+    warn 'Opening the ports in ufw failed; check by hand.'
     return 0
   fi
-  ok 'فایروال به‌روز شد'
+  ok 'Firewall updated'
   return 0
 }
 
 # ---------------------------------------------------------------- TLS -----
 TLS_STATE='none'
 
-# این بررسی فقط تشخیصی است. پشت Cloudflare یا NAT، DNS عمداً به آدرس دیگری
-# اشاره می‌کند و نباید مانع گرفتن گواهی شود.
+# This check is diagnostic only. Behind Cloudflare or NAT, DNS deliberately
+# points elsewhere and must not block a certificate that would otherwise
+# issue.
 dns_report() {
   local host=$1
   local v4 v6 public_ip ns
@@ -1409,25 +1406,25 @@ dns_report() {
   log "dns: $host A=[${v4}] AAAA=[${v6}] public=${public_ip} ns=[${ns}]"
 
   if [[ -z $v4 && -z $v6 ]]; then
-    warn "دامنهٔ $host در DNS پیدا نشد."
-    note 'اگر DNS را تازه تنظیم کرده‌اید، چند دقیقه صبر کنید.'
+    warn "Domain $host was not found in DNS."
+    note 'If you just set the DNS up, give it a few minutes.'
   elif [[ -n $public_ip && " $v4 " == *" $public_ip "* ]]; then
-    ok "دامنه به این سرور اشاره می‌کند ($public_ip)"
+    ok "The domain points at this server ($public_ip)"
   else
-    note "DNS دامنه: IPv4=${v4:-ندارد} IPv6=${v6:-ندارد}"
-    if [[ -n $public_ip ]]; then note "IP عمومی این سرور: $public_ip"; fi
+    note "DNS for the domain: IPv4=${v4:-none} IPv6=${v6:-none}"
+    if [[ -n $public_ip ]]; then note "This server's public IP: $public_ip"; fi
     if [[ ${ns,,} == *cloudflare* ]]; then
-      note 'دامنه از Cloudflare استفاده می‌کند؛ اگر ابر نارنجی روشن باشد، آدرس لبهٔ Cloudflare دیده می‌شود'
-      note 'و این طبیعی است. در آن حالت حالت SSL را روی Full (strict) بگذارید، نه Flexible.'
+      note 'The domain uses Cloudflare. With the orange cloud on, the edge address is what DNS returns,'
+      note 'which is expected. In that case set SSL mode to Full (strict), not Flexible.'
     else
-      note 'ممکن است سرور پشت NAT باشد یا رکورد A به سرور دیگری اشاره کند.'
+      note 'The server may be behind NAT, or the A record may point at a different server.'
     fi
-    note 'certbot خودش این را قطعی تشخیص می‌دهد؛ بنابراین ادامه می‌دهیم.'
+    note 'certbot determines this definitively, so we continue.'
   fi
   return 0
 }
 
-# آیا HTTPS روی همین سرور (با SNI درست و بدون نادیده‌گرفتن خطای گواهی) کار می‌کند؟
+# Does HTTPS work on this server, with the right SNI and without ignoring certificate errors?
 https_works() {
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
@@ -1438,42 +1435,42 @@ https_works() {
 enable_certbot_timer() {
   if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
     if run_logged systemctl enable --now certbot.timer; then
-      ok 'تمدید خودکار گواهی فعال است (certbot.timer)'
+      ok 'Automatic renewal is enabled (certbot.timer)'
     else
-      warn 'فعال‌کردن certbot.timer ناموفق بود؛ تمدید خودکار را بررسی کنید.'
+      warn 'Enabling certbot.timer failed; check automatic renewal.'
     fi
   else
-    warn 'certbot.timer پیدا نشد؛ تمدید خودکار گواهی تنظیم نشد.'
+    warn 'certbot.timer not found; automatic renewal was not configured.'
   fi
   return 0
 }
 
 tls_troubleshooting() {
   ui_out ''
-  bad 'گواهی SSL گرفته نشد.'
-  note 'بدون HTTPS، سرویس‌ورکر و نصب آفلاین کار نمی‌کند؛ پس نصب کامل نیست.'
-  note 'راه‌های رفع:'
-  note "  • اگر دامنه پشت Cloudflare است، حالت SSL را روی Full (strict) بگذارید یا با DNS-01 گواهی بگیرید:"
+  bad 'No SSL certificate was issued.'
+  note 'Without HTTPS the service worker and offline mode do not work, so this install is incomplete.'
+  note 'How to fix it:'
+  note "  * Behind Cloudflare: set SSL mode to Full (strict), or issue with DNS-01:"
   note "      sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials <file> -d $OPT_DOMAIN"
-  note '  • اگر سرور پشت NAT است، پورت ۸۰ باید از بیرون به این سرور برسد.'
-  note "  • رکورد A/AAAA دامنه را به IP این سرور تغییر دهید، سپس: sudo certbot --nginx -d $OPT_DOMAIN"
-  note "  • جزئیات خطا: grep -i 'certbot\\|acme' $LOG_FILE"
+  note '  * Behind NAT: port 80 must reach this server from the outside.'
+  note "  * Point the domain's A/AAAA record at this server, then: sudo certbot --nginx -d $OPT_DOMAIN"
+  note "  * Error details: grep -i 'certbot\\|acme' $LOG_FILE"
   ui_out ''
   return 0
 }
 
 setup_tls() {
-  step 'نصب گواهی SSL'
+  step 'Installing the SSL certificate'
 
   if [[ $OPT_SKIP_TLS -eq 1 ]]; then
-    warn 'به‌درخواست شما نصب گواهی انجام نشد (--skip-tls). سایت روی HTTP می‌ماند.'
-    note 'توجه: بدون HTTPS، سرویس‌ورکر و قابلیت آفلاین و نصب روی گوشی کار نمی‌کند.'
+    warn 'No certificate installed, as requested (--skip-tls). The site stays on HTTP.'
+    note 'Note: without HTTPS the service worker, offline mode and phone install do not work.'
     TLS_STATE='skipped'
     return 0
   fi
 
   if ! have certbot; then
-    bad 'certbot نصب نشد؛ HTTPS برقرار نشد.'
+    bad 'certbot was not installed; HTTPS was not set up.'
     tls_troubleshooting
     TLS_STATE='missing'
     return 0
@@ -1492,25 +1489,25 @@ setup_tls() {
   fi
 
   if [[ -d /etc/letsencrypt/live/$OPT_DOMAIN ]]; then
-    note 'گواهی موجود است؛ تمدید بررسی می‌شود.'
+    note 'A certificate exists; checking renewal.'
     if https_works; then
-      ok 'HTTPS با گواهی موجود کار می‌کند'
+      ok 'HTTPS works with the existing certificate'
       TLS_STATE='existing'
       enable_certbot_timer
       return 0
     fi
-    warn 'گواهی موجود است اما HTTPS پاسخ درست نمی‌دهد؛ دوباره درخواست می‌شود.'
+    warn 'A certificate exists but HTTPS does not respond correctly; requesting again.'
   fi
 
   if [[ $NON_INTERACTIVE -eq 0 ]]; then
-    if ! ask_yes_no "گواهی رایگان Let's Encrypt برای $OPT_DOMAIN نصب شود؟" y; then
-      warn 'نصب گواهی رد شد؛ سایت روی HTTP می‌ماند و قابلیت آفلاین کار نمی‌کند.'
+    if ! ask_yes_no "Install a free Let's Encrypt certificate for $OPT_DOMAIN?" y; then
+      warn 'Certificate install declined; the site stays on HTTP and offline will not work.'
       TLS_STATE='declined'
       return 0
     fi
   fi
 
-  note "درخواست گواهی از Let's Encrypt…"
+  note "Requesting a certificate from Let's Encrypt..."
   local certbot_args=(--non-interactive --agree-tos --no-eff-email -m "$OPT_EMAIL")
   if [[ -n $OPT_CF_CREDENTIALS ]]; then
     certbot_args+=(certonly --dns-cloudflare --dns-cloudflare-credentials "$OPT_CF_CREDENTIALS")
@@ -1524,46 +1521,46 @@ setup_tls() {
   fi
 
   if certbot "${certbot_args[@]}" >>"$LOG_PATH" 2>&1; then
-    ok 'گواهی صادر شد'
+    ok 'Certificate issued'
   else
     tls_troubleshooting
     TLS_STATE='failed'
-    # کانفیگ ممکن است نیمه‌کاره تغییر کرده باشد؛ صحت را می‌سنجیم.
+    # The config may have been left half-changed; validating it.
     if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-      warn 'کانفیگ nginx پس از تلاش ناکام certbot معتبر نیست.'
+      warn 'The nginx config is not valid after the failed certbot attempt.'
       write_site_config || true
       if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-        die 'کانفیگ nginx نیاز به بررسی دستی دارد. nginx بارگذاری نشد.'
+        die 'The nginx config needs manual review. nginx was not reloaded.'
       fi
-      note 'کانفیگ به قالب HTTP بازگردانده شد'
+      note 'The config was restored to the HTTP template'
     fi
     run_logged systemctl reload nginx || true
     return 0
   fi
 
   if [[ -n $OPT_CF_CREDENTIALS ]]; then
-    # در حالت DNS-01، certbot فایل گواهی را می‌سازد اما کانفیگ nginx را
-    # دست نمی‌زند؛ خودمان قالب HTTPS را با --nginx می‌سازیم.
+    # With DNS-01, certbot writes the certificate but leaves the nginx config
+    # alone, so the HTTPS template is generated with certbot install --nginx.
     if certbot install --nginx --non-interactive --redirect "${hosts_args[@]}" >>"$LOG_PATH" 2>&1; then
-      ok 'کانفیگ nginx برای HTTPS به‌روز شد'
+      ok 'The nginx config was updated for HTTPS'
     else
-      warn 'نصب گواهی در nginx ناموفق بود.'
+      warn 'Installing the certificate into nginx failed.'
     fi
   fi
 
-  # کانفیگ ممکن است توسط certbot بازنویسی شده باشد؛ صحت را دوباره می‌سنجیم.
+  # certbot may have rewritten the config; validating it again.
   if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-    warn 'certbot کانفیگ را تغییر داد و اکنون معتبر نیست؛ کانفیگ ما بازنویسی می‌شود.'
+    warn 'certbot changed the config and it is no longer valid; rewriting ours.'
     write_site_config || true
     if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-      die 'کانفیگ nginx پس از certbot نیاز به بررسی دستی دارد. nginx بارگذاری نشد.'
+      die 'The nginx config needs manual review after certbot. nginx was not reloaded.'
     fi
-    warn 'کانفیگ به قالب HTTP بازگشت؛ HTTPS باید دستی تنظیم شود.'
+    warn 'The config went back to the HTTP template; HTTPS needs manual setup.'
   fi
   run_logged systemctl reload nginx || true
 
   if https_works; then
-    ok 'HTTPS با گواهی تازه کار می‌کند'
+    ok 'HTTPS works with the new certificate'
     TLS_STATE='issued'
     enable_certbot_timer
   else
@@ -1573,7 +1570,7 @@ setup_tls() {
   return 0
 }
 
-# ------------------------------------------------------- تست سلامت --------
+# ------------------------------------------------------- health check --------
 HEALTH_FAILED=0
 HEALTH_WARNED=0
 SCHEME='http'
@@ -1581,8 +1578,9 @@ SCHEME='http'
 health_pass() { ok "$1"; }
 health_fail() { bad "$1"; HEALTH_FAILED=$((HEALTH_FAILED + 1)); }
 
-# آدرس‌ها را با SNI و Host درست و بدون نادیده‌گرفتن خطای گواهی می‌سنجیم تا
-# اشتباهاً پاسخ سرور پیش‌فرض یا لبهٔ Cloudflare سنجیده نشود.
+# Requests use the right SNI and Host and do not ignore certificate
+# errors, so we never accidentally test the default server or the Cloudflare
+# edge.
 curl_here() {
   curl -sS --max-time 15 \
     --resolve "${OPT_DOMAIN}:80:127.0.0.1" \
@@ -1590,18 +1588,18 @@ curl_here() {
 }
 
 check_path() {
-  # check_path <مسیر> <کد انتظار> <الگوی هدر اختیاری>
+  # check_path <path> <expected code> <optional header pattern>
   local path=$1 expect=$2 header=${3:-}
   local url="${SCHEME}://${OPT_DOMAIN}${path}"
   local code
   code=$(curl_here -o /tmp/hamgam-health-body -w '%{http_code}' "$url" 2>/dev/null) || code=000
   if [[ $code != "$expect" ]]; then
-    health_fail "$path پاسخ $code داد (انتظار $expect)"
+    health_fail "$path returned $code (expected $expect)"
     return 1
   fi
   if [[ -n $header ]]; then
     if ! curl_here -sI "$url" 2>/dev/null | grep -qi "$header"; then
-      health_fail "هدر «$header» برای $path تنظیم نشده"
+      health_fail "Header $header is not set for $path"
       return 1
     fi
   fi
@@ -1609,56 +1607,56 @@ check_path() {
 }
 
 health_check() {
-  step 'تست سلامت سرویس'
+  step 'Service health check'
   init_paths
 
   SCHEME='http'
   if https_works; then SCHEME='https'; fi
 
-  # ۱) صحت کانفیگ و وضعیت سرویس
+  # 1) Config validity and service state
   if nginx -t >/dev/null 2>>"$LOG_PATH"; then
-    health_pass 'کانفیگ nginx معتبر است'
+    health_pass 'The nginx config is valid'
   else
-    health_fail 'کانفیگ nginx معتبر نیست'
+    health_fail 'The nginx config is not valid'
   fi
   if systemctl is-active --quiet nginx; then
-    health_pass 'سرویس nginx در حال اجراست'
+    health_pass 'The nginx service is running'
   else
-    health_fail 'سرویس nginx اجرا نمی‌شود'
+    health_fail 'The nginx service is not running'
   fi
 
   if [[ ! -L $CURRENT_LINK ]]; then
-    health_fail "پیوند نسخهٔ فعال وجود ندارد: $CURRENT_LINK"
+    health_fail "The live release symlink is missing: $CURRENT_LINK"
   else
     local cur
     cur=$(current_release)
     if [[ -f $cur/index.html && -f $cur/sw.js ]]; then
-      health_pass "نسخهٔ فعال سالم است: $(basename "$cur")"
+      health_pass "The live release is healthy: $(basename "$cur")"
     else
-      health_fail "نسخهٔ فعال ناقص است: $cur"
+      health_fail "The live release is incomplete: $cur"
     fi
   fi
 
-  # ۲) فایل‌های کلیدی و هدرها
-  if check_path / 200; then health_pass 'صفحهٔ اصلی پاسخ ۲۰۰ می‌دهد'; fi
+  # 2) Key files and headers
+  if check_path / 200; then health_pass 'The home page returns 200'; fi
 
   if curl_here "${SCHEME}://${OPT_DOMAIN}/" 2>/dev/null | grep -q 'id="root"'; then
-    health_pass 'صفحهٔ اصلی ساختار درست دارد'
+    health_pass 'The home page has the expected structure'
   else
-    health_fail 'صفحهٔ اصلی محتوای مورد انتظار را ندارد'
+    health_fail 'The home page is missing the expected content'
   fi
 
   if check_path /index.html 200 'Cache-Control: *no-cache'; then
-    health_pass 'index.html با no-cache سرو می‌شود'
+    health_pass 'index.html is served with no-cache'
   fi
   if check_path /sw.js 200 'Cache-Control: *no-cache'; then
-    health_pass 'sw.js با no-cache سرو می‌شود'
+    health_pass 'sw.js is served with no-cache'
   fi
   if check_path /manifest.webmanifest 200 'application/manifest+json'; then
-    health_pass 'مانیفست با نوع درست سرو می‌شود'
+    health_pass 'The manifest is served with the right type'
   fi
 
-  # ۳) همهٔ asset هایی که صفحهٔ اصلی ارجاع می‌دهد باید موجود باشند.
+  # 3) Every asset the home page references must exist.
   local refs missing_assets=0 total_assets=0 a
   refs=$(grep -oE '(src|href)="[^"]*/assets/[^"]+"' "$CURRENT_LINK/index.html" 2>/dev/null |
     sed -E 's/.*="([^"]*)".*/\1/' | sort -u || true)
@@ -1668,40 +1666,40 @@ health_check() {
     if ! check_path "$a" 200; then missing_assets=$((missing_assets + 1)); fi
   done <<<"$refs"
   if [[ $total_assets -eq 0 ]]; then
-    health_fail 'هیچ فایل asset ای در index.html پیدا نشد'
+    health_fail 'index.html references no assets'
   elif [[ $missing_assets -eq 0 ]]; then
-    health_pass "همهٔ $(fa "$total_assets") فایل asset سالم است"
+    health_pass "All $total_assets assets are healthy"
   fi
 
-  # ۴) هدر immutable روی assets
+  # 4) immutable header on assets
   local first_asset
   first_asset=$(printf '%s\n' "$refs" | head -1)
   if [[ -n $first_asset ]]; then
     if curl_here -sI "${SCHEME}://${OPT_DOMAIN}${first_asset}" 2>/dev/null | grep -qi 'immutable'; then
-      health_pass 'فایل‌های assets با کش طولانی سرو می‌شوند'
+      health_pass 'Assets are served with a long cache'
     else
-      warn 'هدر immutable روی assets دیده نشد؛ بارگذاری کمی کندتر می‌شود.'
+      warn 'No immutable header on assets; loading will be a little slower.'
       HEALTH_WARNED=$((HEALTH_WARNED + 1))
     fi
   fi
 
-  # ۵) سرویس‌ورکر واقعاً ساخته شده باشد
+  # 5) The service worker is really present
   if grep -q 'precacheAndRoute\|workbox' "$CURRENT_LINK/sw.js" 2>/dev/null; then
-    health_pass 'سرویس‌ورکر آفلاین ساخته شده است'
+    health_pass 'The offline service worker was generated'
   else
-    health_fail 'سرویس‌ورکر معتبر به نظر نمی‌رسد'
+    health_fail 'The service worker does not look valid'
   fi
 
-  # ۶) HTTPS برای یک PWA ضروری است، نه تزئینی.
+  # 6) HTTPS is required for a PWA, not decorative.
   if [[ $OPT_SKIP_TLS -eq 0 ]]; then
     if https_works; then
-      health_pass 'HTTPS با گواهی معتبر کار می‌کند'
+      health_pass 'HTTPS works with a valid certificate'
       local code
       code=$(curl_here -o /dev/null -w '%{http_code}' "http://${OPT_DOMAIN}/" 2>/dev/null || true)
       if [[ $code =~ ^30[0-9]$ ]]; then
-        health_pass 'HTTP به HTTPS هدایت می‌شود'
+        health_pass 'HTTP redirects to HTTPS'
       else
-        health_fail "هدایت HTTP به HTTPS برقرار نیست (پاسخ $code)"
+        health_fail "HTTP does not redirect to HTTPS (got $code)"
       fi
 
       local expiry days
@@ -1710,98 +1708,98 @@ health_check() {
       if [[ -n $expiry ]]; then
         days=$((($(date -d "$expiry" +%s) - $(date +%s)) / 86400))
         if [[ $days -gt 20 ]]; then
-          health_pass "گواهی SSL تا $(fa "$days") روز دیگر معتبر است"
+          health_pass "The SSL certificate is valid for $days more days"
         else
-          health_fail "گواهی SSL فقط $(fa "$days") روز اعتبار دارد؛ تمدید را بررسی کنید."
+          health_fail "The SSL certificate has only $days days left; check renewal."
         fi
       fi
     else
-      health_fail 'HTTPS برقرار نیست؛ بدون آن سرویس‌ورکر و نصب آفلاین کار نمی‌کند.'
+      health_fail 'HTTPS is not working; without it the service worker and offline install do not work.'
     fi
   fi
   return 0
 }
 
-# ----------------------------------------------------------- جمع‌بندی ------
+# ------------------------------------------------------------ summary ------
 summary() {
-  step 'جمع‌بندی'
+  step 'Summary'
 
   local https_now=0
   if https_works; then https_now=1; fi
   local url="http://$OPT_DOMAIN"
   if [[ $https_now -eq 1 ]]; then url="https://$OPT_DOMAIN"; fi
 
-  # HTTPS برای یک PWA الزامی است؛ فقط --skip-tls صریح آن را معاف می‌کند.
+  # HTTPS is required for a PWA; only an explicit --skip-tls exempts it.
   local tls_ok=0
   if [[ $OPT_SKIP_TLS -eq 1 || $https_now -eq 1 ]]; then tls_ok=1; fi
 
   local tls_note=''
   case $TLS_STATE in
-    skipped) tls_note='گواهی به‌درخواست شما نصب نشد (--skip-tls).' ;;
-    missing) tls_note='certbot نصب نشد؛ نمی‌توانستیم گواهی بگیریم.' ;;
-    declined) tls_note='نصب گواهی را رد کردید.' ;;
-    failed) tls_note='تلاش برای گرفتن گواهی ناموفق بود.' ;;
+    skipped) tls_note='No certificate was installed, as requested (--skip-tls).' ;;
+    missing) tls_note='certbot was not installed, so no certificate could be issued.' ;;
+    declined) tls_note='You declined the certificate install.' ;;
+    failed) tls_note='The attempt to issue a certificate failed.' ;;
   esac
 
   ui_out ''
   if [[ $HEALTH_FAILED -eq 0 && $tls_ok -eq 1 ]]; then
     ui_out "${C_GREEN}${C_BOLD}   ╭──────────────────────────────────────────────────────────╮${C_RESET}"
-    ui_out "${C_GREEN}${C_BOLD}   │${C_RESET}  ${C_GREEN}${C_BOLD}✓ نصب با موفقیت کامل شد${C_RESET}                                 ${C_GREEN}${C_BOLD}│${C_RESET}"
+    panel_row "${C_GREEN}${C_BOLD}" 'Installation completed successfully'
     ui_out "${C_GREEN}${C_BOLD}   ╰──────────────────────────────────────────────────────────╯${C_RESET}"
   elif [[ $HEALTH_FAILED -eq 0 ]]; then
     ui_out "${C_YELLOW}${C_BOLD}   ╭──────────────────────────────────────────────────────────╮${C_RESET}"
-    ui_out "${C_YELLOW}${C_BOLD}   │${C_RESET}  ${C_YELLOW}${C_BOLD}▲ نصب انجام شد، اما HTTPS برقرار نیست${C_RESET}                ${C_YELLOW}${C_BOLD}│${C_RESET}"
+    panel_row "${C_YELLOW}${C_BOLD}" 'Installed, but HTTPS is not working'
     ui_out "${C_YELLOW}${C_BOLD}   ╰──────────────────────────────────────────────────────────╯${C_RESET}"
     if [[ -n $tls_note ]]; then note "$tls_note"; fi
-    note 'سایت روی HTTP باز می‌شود، اما سرویس‌ورکر، حالت آفلاین و نصب روی گوشی کار نمی‌کند.'
-    note 'این نصب کامل نیست؛ خطوط بالا را برای گرفتن گواهی دنبال کنید.'
+    note 'The site opens over HTTP, but the service worker, offline mode and phone install do not work.'
+    note 'This install is incomplete; follow the lines above to get a certificate.'
   else
     ui_out "${C_YELLOW}${C_BOLD}   ╭──────────────────────────────────────────────────────────╮${C_RESET}"
-    ui_out "${C_YELLOW}${C_BOLD}   │${C_RESET}  ${C_YELLOW}${C_BOLD}▲ نصب انجام شد، اما $(fa "$HEALTH_FAILED") بررسی هشدار داد${C_RESET}          ${C_YELLOW}${C_BOLD}│${C_RESET}"
+    panel_row "${C_YELLOW}${C_BOLD}" "Installed, but $HEALTH_FAILED check(s) failed"
     ui_out "${C_YELLOW}${C_BOLD}   ╰──────────────────────────────────────────────────────────╯${C_RESET}"
-    note 'موارد بالا را بررسی کنید.'
+    note 'Review the items above.'
   fi
 
   ui_out ''
-  plain "  ${C_BOLD}نشانی سایت${C_RESET}"
+  plain "  ${C_BOLD}Site address${C_RESET}"
   plain "    ${C_TEAL}${C_BOLD}$url${C_RESET}"
   ui_out ''
-  plain "  ${C_BOLD}جزئیات${C_RESET}"
-  plain "    دامنه                $OPT_DOMAIN"
-  plain "    نسخهٔ فعال            $(basename "$(current_release 2>/dev/null || printf 'unknown')")"
-  plain "    مسیر نسخه‌ها           $RELEASES_DIR"
-  plain "    پیوند نسخهٔ فعال       $CURRENT_LINK"
-  plain "    کانفیگ nginx         $NGINX_SITE"
-  plain "    فایل تنظیمات          $CONF_FILE"
-  plain "    لاگ نصب               $LOG_FILE"
+  plain "  ${C_BOLD}Details${C_RESET}"
+  plain "    Domain               $OPT_DOMAIN"
+  plain "    Live release         $(basename "$(current_release 2>/dev/null || printf 'unknown')")"
+  plain "    Releases             $RELEASES_DIR"
+  plain "    Live symlink         $CURRENT_LINK"
+  plain "    nginx config         $NGINX_SITE"
+  plain "    Settings file        $CONF_FILE"
+  plain "    Install log          $LOG_FILE"
   ui_out ''
 
-  plain "  ${C_BOLD}نصب روی گوشی${C_RESET}"
-  note 'آیفون: سایت را در Safari باز کنید ← دکمهٔ Share ← Add to Home Screen ← Add'
-  note 'اندروید: سایت را در Chrome باز کنید ← منوی سه‌نقطه ← Install app ← Install'
+  plain "  ${C_BOLD}Installing on a phone${C_RESET}"
+  note 'iPhone: open the site in Safari, tap Share, then Add to Home Screen, then Add'
+  note 'Android: open the site in Chrome, open the three-dot menu, then Install app, then Install'
   ui_out ''
 
-  plain "  ${C_BOLD}کارهای بعدی${C_RESET}"
-  note "به‌روزرسانی نسخه: sudo bash $0 --update"
-  note "بازگردانی به نسخهٔ پیشین: sudo bash $0 --rollback"
+  plain "  ${C_BOLD}Next steps${C_RESET}"
+  note "Update:   sudo bash $0 --update"
+  note "Rollback: sudo bash $0 --rollback"
   if [[ $OPT_SKIP_TLS -eq 1 || $tls_ok -eq 0 ]]; then
-    note "گرفتن گواهی SSL: sudo certbot --nginx -d $OPT_DOMAIN"
+    note "Get a certificate: sudo certbot --nginx -d $OPT_DOMAIN"
   fi
-  note 'تست نهایی: سایت را در مرورگر باز کنید و پس از بار اول، اینترنت را قطع کنید.'
+  note 'Final test: open the site, then cut the network and reload.'
   ui_out ''
 
-  plain "  ${C_YELLOW}${C_BOLD}نکتهٔ مهم دربارهٔ دادهٔ کاربران${C_RESET}"
-  note 'دادهٔ هر کاربر فقط در مرورگر خودش (IndexedDB) ذخیره می‌شود؛ روی سرور هیچ نسخه‌ای نیست.'
-  note 'بکاپ این اسکریپت فقط فایل‌های برنامه است، نه دادهٔ کاربران. تغییر دامنه یا سوئیچ'
-  note 'HTTP به HTTPS هم دادهٔ مرورگر را منتقل نمی‌کند.'
+  plain "  ${C_YELLOW}${C_BOLD}Important: where user data lives${C_RESET}"
+  note 'User data stays only in the browser on each device (IndexedDB); the server holds no copy.'
+  note 'This script backs up app files, not user data. Changing the domain, or'
+  note 'moving HTTP to HTTPS, does not carry browser data across either.'
   ui_out ''
 
   if [[ $HEALTH_FAILED -gt 0 ]]; then
-    plain "  ${C_YELLOW}تعداد بررسی‌های ناموفق: $(fa "$HEALTH_FAILED")${C_RESET}"
-    plain "  ${C_DIM}خط لاگ مرتبط: grep -iE 'fail|error' $LOG_FILE${C_RESET}"
+    plain "  ${C_YELLOW}Failed checks: $HEALTH_FAILED${C_RESET}"
+    plain "  ${C_DIM}Related log lines: grep -iE 'fail|error' $LOG_FILE${C_RESET}"
     ui_out ''
     if [[ $SWAP_DONE -eq 1 ]]; then
-      warn 'نسخهٔ تازه فعال مانده است. اگر سایت ناسالم است، همین حالا بازگردانی کنید:'
+      warn 'The new release is still live. If the site is unhealthy, roll back now:'
       note "  sudo bash $0 --rollback"
     fi
   fi
@@ -1812,19 +1810,21 @@ summary() {
   return 0
 }
 
-# -------------------------------------------------------------- اجرا ------
+# ---------------------------------------------------------------- run ------
 run_rollback() {
   init_paths
   guard_webroot "$SITE_ROOT"
   if ! systemctl is-active --quiet nginx; then
-    warn 'nginx اجرا نمی‌شود؛ فقط پیوند نسخه جابه‌جا می‌شود.'
+    warn 'nginx is not running; only the release symlink will be swapped.'
   fi
   rollback_deploy
-  ok 'بازگردانی انجام شد'
+  ok 'Rollback complete'
   return 0
 }
 
 main() {
+  # Keep diagnostics from system tools in English, regardless of SSH locale.
+  export LC_ALL=C
   parse_args "$@"
   init_log "$@"
   need_root "$@"
@@ -1843,8 +1843,9 @@ main() {
   save_config
 
   if [[ $UPDATE_ONLY -eq 1 ]]; then
-    # در حالت به‌روزرسانی هم قفل، اعتبارسنجی، بازگردانی و تست سلامت حفظ
-    # می‌شوند؛ فقط بسته‌های سیستمی و کانفیگ nginx دست نمی‌خورند.
+    # Update mode still takes the lock, validates the build, supports rollback
+    # and runs the health check; only system packages and the nginx config are
+    # left alone.
     fetch_and_build
     deploy_files
     configure_nginx

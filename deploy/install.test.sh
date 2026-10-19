@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# تست‌های واحد برای توابع خالص deploy/install.sh
-# اجرا: bash deploy/install.test.sh
+# Unit tests for the pure functions in deploy/install.sh
+# Run: bash deploy/install.test.sh
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-# برای source کردن، main اجرا نمی‌شود (نگهبان BASH_SOURCE).
+# Sourcing does not run main (guarded by BASH_SOURCE).
 # shellcheck source=deploy/install.sh disable=SC1090,SC1091
 . "$SCRIPT_DIR/install.sh"
 
-# اسکریپت اصلی با set -Eeuo و trap ERR بالا می‌آید؛ در تست این‌ها را خنثی
-# می‌کنیم تا یک تستِ ناموفق کل فایل را متوقف نکند.
+# The script itself starts with set -Eeuo and an ERR trap; neutralise both
+# here so one failing assertion does not abort the whole file.
 set +e
 trap - ERR
 
@@ -26,11 +26,19 @@ t() {
   fi
 }
 
-# ------------------------------------------------------------ fa ----
-t 'fa: Persian digits' '۱۲۳۴۵۶۷۸۹۰' "$(fa 1234567890)"
-t 'fa: no digits' 'سلام' "$(fa 'سلام')"
-t 'fa: converts digits, keeps punctuation' 'نسخهٔ ۲.۰.۰' "$(fa 'نسخهٔ 2.0.0')"
-t 'fa: empty' '' "$(fa '')"
+# --------------------------------------------------- English terminal UI ----
+# Match Arabic/Persian UTF-8 bytes without requiring a particular locale.
+LC_ALL=C grep -qP '[\xD8-\xDB][\x80-\xBF]' "$SCRIPT_DIR/install.sh"
+t 'installer contains no Persian/Arabic script' '1' "$?"
+help=$(bash "$SCRIPT_DIR/install.sh" --help)
+t 'help exits successfully without root' '0' "$?"
+t 'help is English' 'yes' "$([[ $help == *'Hamgam | server installer'* && $help == *'Options:'* ]] && echo yes || echo no)"
+row=$(panel_row '' 'Installed, but 123 check(s) failed')
+row=${row#*│}; row=${row%│*}
+t 'panel row keeps its width with a dynamic count' '58' "${#row}"
+STEP_INDEX=0
+step_text=$(step 'Checking the system')
+t 'step counter uses Latin digits' 'yes' "$([[ $step_text == *'step 1 of 10:'* ]] && echo yes || echo no)"
 
 # --------------------------------------------------- valid_path ----
 t 'valid_path: normal' 'yes' "$(valid_path /var/www/hamgam && echo yes || echo no)"
@@ -43,13 +51,13 @@ guard_webroot /var/www/hamgam >/dev/null 2>&1
 t 'guard_webroot: accepts /var/www/hamgam' '0' "$?"
 
 for bad in / /etc /usr/bin /var /opt /root /dev/null '..' ''; do
-  # در subshell اجرا می‌کنیم چون die از exit استفاده می‌کند.
+  # Run in a subshell, because die calls exit.
   (guard_webroot "$bad" >/dev/null 2>&1)
   t "guard_webroot: rejects '$bad'" '1' "$?"
 done
 
 # ------------------------------------------- build_server_names ----
-# shellcheck disable=SC2034  # در توابع source‌شدهٔ install.sh خوانده می‌شوند
+# shellcheck disable=SC2034  # read by the functions sourced from install.sh
 OPT_DOMAIN='fit.example.com'
 OPT_EXTRA_HOSTS=''
 t 'server_names: single' 'fit.example.com' "$(build_server_names)"
@@ -65,7 +73,7 @@ t 'extra_hosts: valid accepted' '0' "$?"
 t 'extra_hosts: invalid rejected' '1' "$?"
 
 # ------------------------------------------ domain/email regex ----
-# نتیجهٔ تطبیق را صریح در متغیر می‌گیریم؛ $? بعد از یک شرط مستقل قابل اتکا نیست.
+# Capture the match result explicitly; $? after a condition is not reliable.
 matches() { [[ $1 =~ $2 ]]; }
 for d in fit.example.com a-b.example.co.uk sub.domain.example.com; do
   matches "$d" "$VALID_DOMAIN_RE"
@@ -98,12 +106,12 @@ write_if_changed "$target" <<<"beta" >/dev/null 2>&1
 t 'write_if_changed: changed returns 0' '0' "$?"
 t 'write_if_changed: content updated' 'beta' "$(cat "$target")"
 t 'write_if_changed: mode 0644' '644' "$(stat -c '%a' "$target")"
-# فایل موقت باید همان‌جا پاک شود؛ mktemp روی هر پلتفرمی جای دیگری می‌سازد،
-# پس شمارش فایل‌های موقتِ بی‌صاحب در برابر الگوی خودمان انجام می‌شود.
+# The temp file must be cleaned up in place. mktemp picks its own directory
+# per platform, so count leftovers against our own prefix.
 t 'write_if_changed: no temp leak' '0' "$(find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -name 'hamgam-wic.*' 2>/dev/null | wc -l | tr -d ' ')"
 
 # ------------------------------------------- nginx config paths ----
-# مسیرهای تولیدشده باید به پیوند نسخه اشاره کنند، نه به پوشهٔ تخت.
+# Generated paths must point at the release symlink, not a flat directory.
 OPT_WEBROOT="$TMP/www"
 init_paths
 t 'init_paths: SITE_ROOT' "$TMP/www" "$SITE_ROOT"
@@ -111,7 +119,7 @@ t 'init_paths: RELEASES_DIR' "$TMP/www/releases" "$RELEASES_DIR"
 t 'init_paths: CURRENT_LINK' "$TMP/www/current" "$CURRENT_LINK"
 
 # ------------------------------------- config heredoc assembly ----
-# بازتولید همان heredoc ای که write_site_config می‌نویسد، بدون تماس با nginx.
+# Reproduce the heredoc write_site_config emits, without calling nginx.
 OPT_EXTRA_HOSTS=''
 CURRENT_LINK='/var/www/hamgam/current'
 server_names=$(build_server_names)
@@ -129,9 +137,9 @@ EOF
 )
 t 'site config: root is current symlink' 'yes' "$(grep -q 'root /var/www/hamgam/current;' <<<"$CONF" && echo yes || echo no)"
 t 'site config: server_name present' 'yes' "$(grep -q 'server_name fit.example.com;' <<<"$CONF" && echo yes || echo no)"
-# shellcheck disable=SC2016  # عمداً یک $ تحت‌اللفظی در کانفیگ تولیدشده را می‌جوییم
+# shellcheck disable=SC2016  # deliberately matching a literal $ in generated config
 t 'site config: $hamgam_cache not expanded' 'yes' "$(grep -q 'Cache-Control \$hamgam_cache' <<<"$CONF" && echo yes || echo no)"
-# shellcheck disable=SC2016  # عمداً یک $ تحت‌اللفظی در کانفیگ تولیدشده را می‌جوییم
+# shellcheck disable=SC2016  # deliberately matching a literal $ in generated config
 t 'site config: $uri not expanded' 'yes' "$(grep -q 'try_files \$uri =404;' <<<"$CONF" && echo yes || echo no)"
 t 'site config: no stray backslash-dollar' '0' "$(grep -c '\\\$' <<<"$CONF" | tr -d ' ')"
 t 'site config: headers included once' '1' "$(grep -c 'include /etc/nginx/snippets/hamgam-headers.conf;' <<<"$CONF" | tr -d ' ')"
@@ -154,7 +162,7 @@ t 'cache map: assets immutable' 'yes' "$(grep -q '/assets/' <<<"$MAP" && grep -q
 t 'cache map: sw.js no-cache' 'yes' "$(grep -q '=/sw.js  *"no-cache, must-revalidate"' <<<"$MAP" && echo yes || echo no)"
 
 # ----------------------------------------------- merge_previous ----
-# نسخهٔ پیشین باید فایل‌های هش‌دار خودش را در نسخهٔ تازه نگه دارد.
+# The previous release's hashed assets must survive into the new one.
 NEW="$TMP/rel/new"; OLD="$TMP/rel/old"
 mkdir -p "$NEW/assets" "$OLD/assets"
 echo 'new-app' >"$NEW/assets/index-NEW.js"
@@ -167,7 +175,7 @@ t 'merge: keeps new asset' 'yes' "$([[ -f $NEW/assets/index-NEW.js ]] && echo ye
 t 'merge: does not overwrite existing' 'yes' "$([[ -f $NEW/assets/shared.js ]] && echo yes || echo no)"
 bak=$(find "$TMP/rel/new" -name '*.js.bak' | wc -l | tr -d ' ')
 t 'merge: no .bak files left' '0' "$bak"
-# بدون نسخهٔ پیشین نباید خطا بدهد
+# No previous release must not be an error.
 merge_previous_assets "$NEW" '' >/dev/null 2>&1
 t 'merge: tolerates empty previous' '0' "$?"
 
@@ -190,7 +198,7 @@ printf '%s\n' "$SITE/releases/r1" >"$PREVIOUS_MARK"
 rollback_deploy >/dev/null 2>&1
 t 'rollback: back to r1' "$SITE/releases/r1" "$(readlink "$CURRENT_LINK")"
 t 'rollback: clears SWAP_DONE' '0' "$SWAP_DONE"
-# بدون نشانه، باید فقط هشدار بدهد
+# With no marker, it must only warn.
 rm -f "$PREVIOUS_MARK"
 rollback_deploy >/dev/null 2>&1
 t 'rollback: no marker is safe' '0' "$?"
@@ -221,8 +229,8 @@ echo 'self.precacheAndRoute([])' >"$VB/sw.js"
 echo '{}' >"$VB/manifest.webmanifest"
 echo 'x' >"$VB/assets/index-ABC.js"
 echo 'y' >"$VB/assets/index-XYZ.css"
-# die از exit استفاده می‌کند؛ پس validate_build را داخل یک subshell تودرتو
-# اجرا می‌کنیم تا exit فقط همان subshell را ببندد و کد خروج قابل خواندن بماند.
+# die calls exit, so run validate_build inside a nested subshell: the exit
+# then closes only that subshell and the exit code stays readable.
 vb_code() { (validate_build "$1" >/dev/null 2>&1); echo $?; }
 
 t 'validate_build: good build accepted' '0' "$(vb_code "$VB")"
@@ -235,7 +243,7 @@ mv "$VB/assets/index-ABC.js" "$VB/a.bak"
 t 'validate_build: missing asset rejected' '1' "$(vb_code "$VB")"
 mv "$VB/a.bak" "$VB/assets/index-ABC.js"
 
-# خروجی ساخته‌شده برای GitHub Pages روی دامنهٔ ریشه همه‌چیز را ۴۰۴ می‌کند.
+# A build made for GitHub Pages 404s everything on a domain root.
 sed 's#/assets/#/fit-tracker-pwa/assets/#g' "$VB/index.html" >"$VB/i2"
 mv "$VB/i2" "$VB/index.html"
 t 'validate_build: pages-base build rejected' '1' "$(vb_code "$VB")"
@@ -255,9 +263,9 @@ mv "$VB/i5" "$VB/index.html"
 t 'validate_build: still accepts the restored build' '0' "$(vb_code "$VB")"
 
 # ------------------------------------------- load_saved_conf ----
-# باگ واقعی: در حالت --update فقط مسیرها از فایل تنظیمات بازگردانده می‌شدند و
-# OPT_SOURCE خالی می‌ماند، پس مرحلهٔ ساخت اجرا نمی‌شد و نصب با «پوشهٔ خروجی
-# ساخت پیدا نشد» می‌مرد. پس همهٔ کلیدها باید بازگردانده شوند.
+# Real bug: --update restored only the paths from the settings file, so
+# OPT_SOURCE stayed empty, the build step never ran, and the install died
+# with "build output not found". Every key must be restored.
 CONF_DIR_TEST="$TMP/conf"
 CONF_FILE_TEST="$CONF_DIR_TEST/install.conf"
 mkdir -p "$CONF_DIR_TEST"
@@ -273,9 +281,9 @@ CFG_EXTRA_HOSTS='www.example.com'
 CFG_ENABLE_CSP='1'
 EOF
 
-# load_saved_conf را با مسیر تست بازنویسی می‌کنیم. همان پاک‌سازی نسخهٔ اصلی
-# هم اینجا لازم است: هر بار پیش از خواندن، مقادیر قبلی پاک می‌شوند تا کلید
-# غایب در فایل، مقدار کهنه را باقی نگذارد.
+# Point load_saved_conf at the test file. The same clearing the real one
+# does is needed here: each read wipes previous values so a key missing
+# from the file cannot leave a stale value behind.
 load_saved_conf() {
   [[ -r $CONF_FILE_TEST ]] || return 1
   CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
@@ -286,7 +294,7 @@ load_saved_conf() {
   return 0
 }
 
-# شبیه‌سازی مسیر --update: هیچ مقدار خط فرمانی داده نشده است.
+# Simulate --update: no command-line values were given.
 OPT_DOMAIN='' OPT_EMAIL='' OPT_SOURCE='' OPT_GIT_URL='' OPT_GIT_REF=''
 OPT_WEBROOT='' OPT_REPO_DIR='' OPT_EXTRA_HOSTS=''
 UPDATE_ONLY=1 NON_INTERACTIVE=1 ROLLBACK_ONLY=0
@@ -299,14 +307,14 @@ t 'update: OPT_WEBROOT restored' '/var/www/hamgam' "${OPT_WEBROOT:-}"
 t 'update: OPT_REPO_DIR restored' '/opt/hamgam' "${OPT_REPO_DIR:-}"
 t 'update: OPT_EXTRA_HOSTS restored' 'www.example.com' "${OPT_EXTRA_HOSTS:-}"
 
-# مقدار صریح خط فرمان باید بر مقدار ذخیره‌شده اولویت داشته باشد.
+# An explicit command-line value must win over the saved one.
 OPT_SOURCE='prebuilt' OPT_GIT_REF='v2'
 UPDATE_ONLY=1
 collect_config >/dev/null 2>&1
 t 'update: CLI --source wins over saved' 'prebuilt' "${OPT_SOURCE:-}"
 t 'update: CLI --git-ref wins over saved' 'v2' "${OPT_GIT_REF:-}"
 
-# فایل تنظیمات ناقص نباید باعث سقوط شود، باید پیام روشن بدهد.
+# An incomplete settings file must fail loudly, not crash obscurely.
 cat >"$CONF_FILE_TEST" <<'EOF'
 CFG_SOURCE='git'
 EOF
@@ -317,12 +325,12 @@ t 'update: incomplete conf fails clearly' '1' "$?"
 UPDATE_ONLY=0
 
 # ----------------------------------------- release retention ----
-# پاک‌سازی نسخه‌های قدیمی نباید هرگز نسخهٔ فعال یا هدف بازگردانی را ببرد،
-# وگرنه بعد از معتبر بودن مسیر، --rollback به مسیر ناموجود اشاره می‌کند.
+# Pruning old releases must never remove the live release or the rollback
+# target, or --rollback would point at a path that no longer exists.
 PR="$TMP/prune/www"
 mkdir -p "$PR/releases"
-# RELEASES_KEEP در install.sh به‌صورت readonly تعریف شده و قابل تغییر نیست؛
-# تست با همان مقدار پیش‌فرض کار می‌کند.
+# RELEASES_KEEP is readonly in install.sh and cannot be reassigned here;
+# the test runs with its default value.
 OPT_WEBROOT="$PR"
 init_paths
 keep_a="$RELEASES_DIR/r-keep"; mkdir -p "$keep_a"
@@ -331,7 +339,7 @@ old1="$RELEASES_DIR/r-old1"; mkdir -p "$old1"
 old2="$RELEASES_DIR/r-old2"; mkdir -p "$old2"
 atomic_swap "$keep_a"
 printf '%s\n' "$prev_b" >"$PREVIOUS_MARK"
-# ترتیب زمانی ساخت را شبیه‌سازی می‌کنیم تا نسخه‌های قدیمی از سقف بیرون بزنند.
+# Backdate the directories so older ones fall outside the retention limit.
 touch -d '2026-01-01 00:00:00' "$old2"
 touch -d '2026-01-02 00:00:00' "$old1"
 touch -d '2026-01-03 00:00:00' "$prev_b"
@@ -353,7 +361,7 @@ t 'retention: rollback target kept' 'yes' "$([[ -d $prev_b ]] && echo yes || ech
 t 'retention: oldest release removed' 'no' "$([[ -d $old2 ]] && echo yes || echo no)"
 t 'retention: live symlink still resolves' 'yes' "$([[ -f $CURRENT_LINK/index.html || -d $CURRENT_LINK ]] && echo yes || echo no)"
 
-# --------------------------------------------------------- نتیجه ----
+# ---------------------------------------------------------- results ----
 printf '\n──────────────────────────────\n'
 printf 'passed: %d\nfailed: %d\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
