@@ -32,7 +32,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION='2.1.0'
+readonly SCRIPT_VERSION='2.2.0'
 readonly APP_NAME='Hamgam'
 readonly REPO_URL_DEFAULT='https://github.com/saeedgh837/fit-tracker-pwa.git'
 readonly CONF_DIR='/etc/hamgam'
@@ -187,6 +187,364 @@ on_error() {
 }
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
+# --------------------------------------------------------- owned resources ----
+# A data-only journal of resources actually created, never an executable shell file.
+readonly OWN_FILE="$CONF_DIR/owned.tsv"
+INVENTORY_ACTIVE=0
+OWN_TYPES=() OWN_PATHS=() OWN_IDS=() OWN_HASHES=()
+UNINSTALL_ONLY=0 DRY_RUN=0 ADOPT_LEGACY=0
+
+safe_owned_path() { [[ $1 =~ ^/[a-zA-Z0-9_./-]+$ && $1 != *..* && $1 != *//* && $1 != */./* && $1 != */ ]]; }
+
+protected_ancestry() {
+  local current=$1 owner mode
+  while :; do
+    [[ ! -L $current ]] || return 1
+    if [[ -e $current ]]; then
+      read -r owner mode < <(stat -c '%u %a' -- "$current") || return 1
+      [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 1
+      if (( (8#$mode & 0022) != 0 )); then
+        [[ -d $current ]] && (( (8#$mode & 01000) != 0 )) || return 1
+      fi
+    fi
+    [[ $current == / ]] && break
+    current=$(dirname -- "$current") || return 1
+  done
+}
+
+guard_removal_path() {
+  local path=$1 current target mounts
+  safe_owned_path "$path" || die "Unsafe removal path: $path"
+  case $path in
+    /|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*|/boot|/boot/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/run|/run/*|/root|/root/*|/var|/var/www|/var/log|/var/log/*|/var/lib|/var/lib/*|/opt|/srv|/home|/home/[^/]*|/tmp|/mnt|/media)
+      die "Protected removal path: $path" ;;
+  esac
+  current=$path
+  while :; do
+    [[ ! -L $current ]] || die "Symlink in removal path: $current"
+    [[ $current == / ]] && break
+    current=$(dirname -- "$current") || die 'Cannot inspect removal path.'
+  done
+  [[ $(readlink -m -- "$path") == "$path" ]] || die 'Non-canonical removal path.'
+  # Same-device bind mounts also need protection; do not rely only on rm -xdev.
+  have findmnt || die 'findmnt is required for safe removal.'
+  mounts=$(findmnt -rn -o TARGET) || die 'Cannot determine mount boundaries.'
+  while IFS= read -r target; do
+    [[ $target != "$path" && $target != "$path/"* ]] || die "Mounted filesystem inside removal path: $target"
+  done <<<"$mounts"
+  protected_ancestry "$(dirname -- "$path")" || die 'Untrusted removal path ancestry.'
+}
+
+owned_fingerprint() {
+  if [[ $1 == link ]]; then readlink -- "$2" | sha256sum | cut -d' ' -f1
+  elif [[ $1 == file ]]; then sha256sum -- "$2" | cut -d' ' -f1
+  else printf -- '-\n'; fi
+}
+
+inventory_load() {
+  OWN_TYPES=() OWN_PATHS=() OWN_IDS=() OWN_HASHES=()
+  [[ -e $OWN_FILE || -L $OWN_FILE ]] || return 0
+  if [[ ! -f $OWN_FILE || -L $OWN_FILE ]] || ! protected_ancestry "$OWN_FILE"; then die 'Untrusted ownership inventory.'; fi
+  local header kind path identity digest rest
+  { read -r header
+    [[ $header == HAMGAM_OWNED_V1 ]] || die 'Unsupported ownership inventory version.'
+    while IFS=$'\t' read -r kind path identity digest rest; do
+      [[ -z $rest && $identity =~ ^[0-9]+:[0-9]+$ ]] || die 'Malformed ownership record.'
+      safe_owned_path "$path" || die 'Invalid ownership path.'
+      case $kind in tree|empty|file|link|log) ;; *) die 'Invalid ownership record type.' ;; esac
+      if [[ $kind == tree || $kind == empty ]]; then
+        (guard_removal_path "$path") || die 'Unsafe ownership directory.'
+        [[ $digest == - ]] || die 'Malformed ownership directory digest.'
+      else
+        case $path in
+          "$NGINX_SITE"|"$NGINX_LINK"|"$HEADERS_SNIPPET"|"$CACHE_MAP"|"$CONF_FILE"|"$LOG_FILE"|"$CONF_DIR"/*|/var/log/nginx/hamgam.access.log|/var/log/nginx/hamgam.error.log) ;;
+          *) (guard_removal_path "$(dirname "$path")") || die 'Unsafe owned file parent.' ;;
+        esac
+        if [[ $kind == log ]]; then
+          case $path in "$LOG_FILE"|/var/log/nginx/hamgam.access.log|/var/log/nginx/hamgam.error.log) ;; *) die 'Invalid owned log path.' ;; esac
+          [[ $digest == - ]] || die 'Malformed log record.'
+        else [[ $digest =~ ^[a-f0-9]{64}$ ]] || die 'Malformed ownership digest.'; fi
+      fi
+      OWN_TYPES+=("$kind") OWN_PATHS+=("$path") OWN_IDS+=("$identity") OWN_HASHES+=("$digest")
+    done
+  } <"$OWN_FILE"
+}
+
+inventory_record() {
+  local kind=$1 path=$2 identity digest tmp i
+  safe_owned_path "$path" || die "Cannot record unsafe path: $path"
+  mkdir -p "$CONF_DIR" || die 'Cannot create ownership directory.'
+  chmod 700 "$CONF_DIR"
+  protected_ancestry "$CONF_DIR" || die 'Unsafe ownership directory.'
+  inventory_load
+  identity=$(stat -c '%d:%i' -- "$path") || die 'Cannot record resource identity.'
+  digest=$(owned_fingerprint "$kind" "$path") || die 'Cannot record resource digest.'
+  tmp=$(mktemp "$CONF_DIR/.owned.XXXXXXXX") || die 'Cannot stage ownership inventory.'
+  chmod 600 "$tmp"
+  printf 'HAMGAM_OWNED_V1\n' >"$tmp"
+  for i in "${!OWN_PATHS[@]}"; do
+    [[ ${OWN_PATHS[i]} == "$path" ]] && continue
+    printf '%s\t%s\t%s\t%s\n' "${OWN_TYPES[i]}" "${OWN_PATHS[i]}" "${OWN_IDS[i]}" "${OWN_HASHES[i]}" >>"$tmp"
+  done
+  printf '%s\t%s\t%s\t%s\n' "$kind" "$path" "$identity" "$digest" >>"$tmp"
+  mv -f -- "$tmp" "$OWN_FILE" || die 'Cannot commit ownership inventory.'
+}
+
+record_if_installing() { [[ $INVENTORY_ACTIVE -eq 1 ]] || return 0; inventory_record "$@"; }
+
+inventory_begin() {
+  INVENTORY_ACTIVE=1
+  mkdir -p "$CONF_DIR"
+  chmod 700 "$CONF_DIR"
+  protected_ancestry "$CONF_DIR" || die 'Unsafe configuration directory.'
+  inventory_load
+}
+
+record_nginx_resources() {
+  local path
+  [[ $INVENTORY_ACTIVE -eq 1 ]] || return 0
+  for path in "$NGINX_SITE" "$HEADERS_SNIPPET" "$CACHE_MAP"; do
+    [[ ! -f $path ]] || inventory_record file "$path"
+  done
+  [[ ! -L $NGINX_LINK ]] || inventory_record link "$NGINX_LINK"
+}
+
+# Parse the legacy settings as data, never source/eval during an uninstall.
+legacy_setting() {
+  local name=$1 line value
+  [[ -f $CONF_FILE && ! -L $CONF_FILE ]] && protected_ancestry "$CONF_FILE" || return 1
+  while IFS= read -r line; do
+    [[ $line == "$name="* ]] || continue
+    value=${line#*=}
+    if [[ $value == \'*\' ]]; then value=${value:1:${#value}-2}; fi
+    [[ $value =~ ^[a-zA-Z0-9_./:@-]+$ ]] || return 1
+    printf '%s\n' "$value"
+    return 0
+  done <"$CONF_FILE"
+  return 1
+}
+
+PLAN_TYPES=() PLAN_PATHS=() PLAN_IDS=() PLAN_HASHES=()
+UNPROVEN=0
+build_uninstall_plan() {
+  inventory_load
+  PLAN_TYPES=() PLAN_PATHS=() PLAN_IDS=() PLAN_HASHES=() UNPROVEN=0
+  local i path actual digest kind
+  if [[ ! -e $OWN_FILE ]]; then
+    # No journal means no recursive deletion by guessing. Explicit legacy adoption
+    # below requires installation-specific evidence, not just a plausible name.
+    build_legacy_uninstall_plan
+    return
+  fi
+  for i in "${!OWN_PATHS[@]}"; do
+    path=${OWN_PATHS[i]} kind=${OWN_TYPES[i]}
+    [[ -e $path || -L $path ]] || continue
+    actual=$(stat -c '%d:%i' -- "$path") || die 'Cannot inspect an owned resource.'
+    digest=$(owned_fingerprint "$kind" "$path") || die 'Cannot inspect an owned resource digest.'
+    if [[ $actual != "${OWN_IDS[i]}" || $digest != "${OWN_HASHES[i]}" ]]; then
+      warn "Retaining changed/unproven resource: $path"
+      UNPROVEN=1
+      continue
+    fi
+    PLAN_TYPES+=("$kind") PLAN_PATHS+=("$path") PLAN_IDS+=("$actual") PLAN_HASHES+=("$digest")
+  done
+}
+
+add_legacy_candidate() {
+  local kind=$1 path=$2
+  [[ -e $path || -L $path ]] || return 0
+  PLAN_TYPES+=("$kind") PLAN_PATHS+=("$path")
+  PLAN_IDS+=("$(stat -c '%d:%i' -- "$path")")
+  PLAN_HASHES+=("$(owned_fingerprint "$kind" "$path")")
+}
+
+build_legacy_uninstall_plan() {
+  local web='' repo='' source='' path candidate good=0
+  if [[ -f $CONF_FILE ]]; then
+    web=$(legacy_setting CFG_WEBROOT) || true
+    repo=$(legacy_setting CFG_REPO_DIR) || true
+    source=$(legacy_setting CFG_SOURCE) || true
+  fi
+  if [[ -n $web && -f $NGINX_SITE ]] &&
+     grep -q '^# Generated by deploy/install.sh' "$NGINX_SITE" &&
+     grep -Fq "root $web/current;" "$NGINX_SITE"; then
+    (guard_removal_path "$web") || die 'Legacy webroot is not safe to remove.'
+    # Never adopt a mixed-use webroot. Every release must be this app's bundle.
+    good=1
+    for path in "$web"/* "$web"/.[!.]*; do
+      [[ -e $path || -L $path ]] || continue
+      case ${path##*/} in current|.previous|releases) ;; *) good=0 ;; esac
+    done
+    if [[ ! -L $web/current || $(readlink -f "$web/current") != "$web/releases/"* ]]; then good=0; fi
+    for candidate in "$web"/releases/*; do
+      [[ -d $candidate && ! -L $candidate && -f $candidate/index.html && -f $candidate/sw.js && -f $candidate/manifest.webmanifest ]] || { good=0; break; }
+      grep -q 'id="root"' "$candidate/index.html" && grep -q 'precacheAndRoute\|workbox' "$candidate/sw.js" || good=0
+    done
+    if [[ $good -eq 1 && $ADOPT_LEGACY -eq 1 ]]; then
+      add_legacy_candidate tree "$web"
+    else warn "Legacy webroot retained (use --adopt-legacy only after reviewing it): $web"; UNPROVEN=1; fi
+    for path in "$NGINX_SITE" "$HEADERS_SNIPPET" "$CACHE_MAP"; do
+      if [[ -f $path ]] && grep -q '^# Generated by deploy/install.sh' "$path"; then
+        if [[ $ADOPT_LEGACY -eq 1 ]]; then add_legacy_candidate file "$path"; else UNPROVEN=1; fi
+      fi
+    done
+    if [[ -L $NGINX_LINK && $(readlink -f "$NGINX_LINK") == "$NGINX_SITE" && $ADOPT_LEGACY -eq 1 ]]; then add_legacy_candidate link "$NGINX_LINK"; fi
+  elif [[ -e $NGINX_SITE || -n $web ]]; then
+    warn 'Legacy site ownership cannot be proven; no site directories will be deleted.'
+    UNPROVEN=1
+  fi
+  if [[ $source == git && -n $repo && -d $repo/.git ]]; then
+    if [[ $ADOPT_LEGACY -eq 1 ]] &&
+       grep -q '"name": "fit-tracker-pwa"' "$repo/package.json" &&
+       git -c safe.directory="$repo" -C "$repo" remote get-url origin 2>/dev/null | grep -Eq '(^https://github.com/saeedgh837/fit-tracker-pwa(\.git)?$|^git@github.com:saeedgh837/fit-tracker-pwa\.git$)'; then
+      (guard_removal_path "$repo") || die 'Unsafe legacy clone path.'
+      add_legacy_candidate tree "$repo"
+    else warn "Unproven/legacy clone retained: $repo"; UNPROVEN=1; fi
+  fi
+  if [[ -f $CONF_FILE ]]; then
+    if [[ $ADOPT_LEGACY -eq 1 ]] && grep -q '^# Hamgam install settings;' "$CONF_FILE"; then add_legacy_candidate file "$CONF_FILE"
+    else warn "Legacy settings retained: $CONF_FILE"; UNPROVEN=1; fi
+  fi
+}
+
+# No automatic swapoff: even uninstalling under memory pressure must stay safe.
+report_preserved_resources() {
+  note 'Preserved: external certificates/keys, local sources, prebuilt inputs, shared packages, other sites, Xray and firewall rules.'
+  if [[ -e /var/lib/hamgam-build-swap || -L /var/lib/hamgam-build-swap ]]; then
+    warn 'Swap retained at /var/lib/hamgam-build-swap; no swapoff or fstab changes were made.'
+  fi
+}
+
+recheck_removal_record() {
+  local i=$1 path=${PLAN_PATHS[$1]} kind=${PLAN_TYPES[$1]}
+  [[ -e $path || -L $path ]] || return 0
+  [[ $(stat -c '%d:%i' -- "$path") == "${PLAN_IDS[i]}" && $(owned_fingerprint "$kind" "$path") == "${PLAN_HASHES[i]}" ]] || die "Resource changed during uninstall: $path"
+  if [[ $kind == tree || $kind == empty ]]; then guard_removal_path "$path"; fi
+}
+
+run_uninstall() {
+  local i path kind pid quarantine='' active=0 failed=0 worker pids='' attempt
+  build_uninstall_plan
+  plain 'Hamgam uninstall plan:'
+  for i in "${!PLAN_PATHS[@]}"; do plain "  Remove ${PLAN_TYPES[i]}: ${PLAN_PATHS[i]}"; done
+  report_preserved_resources
+  [[ $ADOPT_LEGACY -eq 0 ]] || warn 'Legacy adoption explicitly requested; reviewed clone/release content will be deleted, including local modifications.'
+  if [[ $DRY_RUN -eq 1 ]]; then note 'Dry run only. No resources changed.'; [[ $UNPROVEN -eq 0 ]]; return; fi
+  if [[ $NON_INTERACTIVE -eq 1 && $ASSUME_YES -ne 1 ]]; then die 'Uninstall requires --yes in non-interactive mode.'; fi
+  if [[ ${#PLAN_PATHS[@]} -eq 0 && $UNPROVEN -eq 0 && ! -e $OWN_FILE ]]; then ok 'No managed Hamgam installation found.'; return 0; fi
+  ask_yes_no 'Permanently remove the listed Hamgam resources?' n || { note 'Uninstall cancelled. No resources changed.'; return 0; }
+  [[ $UNPROVEN -eq 0 ]] || die 'Uninstall incomplete: unproven resources retained. Review them; --yes does not adopt legacy paths.'
+  for i in "${!PLAN_PATHS[@]}"; do recheck_removal_record "$i"; done
+  # A key stored within a removable tree must never disappear as collateral.
+  local cert='' key='' target root
+  cert=$(legacy_setting CFG_TLS_CERT) || true
+  key=$(legacy_setting CFG_TLS_KEY) || true
+  for target in "$cert" "$key"; do
+    [[ -n $target ]] || continue
+    target=$(readlink -m -- "$target") || die 'Cannot resolve preserved certificate path.'
+    for i in "${!PLAN_PATHS[@]}"; do
+      root=${PLAN_PATHS[i]}
+      [[ ${PLAN_TYPES[i]} != tree || ( $target != "$root" && $target != "$root/"* ) ]] || die 'A preserved certificate is inside a removal tree; move it outside first.'
+    done
+  done
+  # Validate and detach nginx config before removing anything it may still serve.
+  local has_nginx=0
+  for path in "${PLAN_PATHS[@]}"; do
+    case $path in "$NGINX_SITE"|"$NGINX_LINK"|"$HEADERS_SNIPPET"|"$CACHE_MAP") has_nginx=1 ;; esac
+  done
+  if [[ $has_nginx -eq 1 ]]; then
+    have nginx || die 'nginx config exists but nginx is unavailable; restore the tool before uninstalling.'
+    nginx -t >>"$LOG_PATH" 2>&1 || die 'Existing nginx configuration is invalid; nothing removed.'
+    systemctl is-active --quiet nginx && active=1
+    quarantine=$(mktemp -d /tmp/hamgam-uninstall.XXXXXXXX) || die 'Cannot stage nginx removal.'
+    chmod 700 "$quarantine"
+    for path in "${PLAN_PATHS[@]}"; do
+      case $path in
+        "$NGINX_SITE"|"$NGINX_LINK"|"$HEADERS_SNIPPET"|"$CACHE_MAP")
+          mkdir -p "$quarantine$(dirname "$path")"
+          mv -- "$path" "$quarantine$path" || { failed=1; break; } ;;
+      esac
+    done
+    if [[ $failed -eq 0 ]] && ! nginx -t >>"$LOG_PATH" 2>&1; then failed=1; fi
+    if [[ $failed -eq 0 && $active -eq 1 ]]; then
+      pids=$(pgrep -f '^nginx: worker process' || true)
+      systemctl reload nginx >>"$LOG_PATH" 2>&1 || failed=1
+      # Graceful reload: old workers may still reference the removed release.
+      for ((attempt=0; attempt<30; attempt++)); do
+        worker=0
+        for pid in $pids; do if kill -0 "$pid" 2>/dev/null; then worker=1; fi; done
+        [[ $worker -eq 1 ]] || break
+        sleep 1
+      done
+      [[ $worker -eq 0 ]] || failed=1
+      systemctl is-active --quiet nginx || failed=1
+    fi
+    if [[ $failed -eq 1 ]]; then
+      for path in "$NGINX_SITE" "$NGINX_LINK" "$HEADERS_SNIPPET" "$CACHE_MAP"; do
+        if [[ -e $quarantine$path || -L $quarantine$path ]]; then mv -- "$quarantine$path" "$path" || true; fi
+      done
+      # A reload that does not actually take is a silent recovery failure: the
+      # files are back on disk but nginx may still be running without them.
+      local restored=0 drain pids2 p hung
+      if nginx -t >>"$LOG_PATH" 2>&1; then
+        restored=1
+        if [[ $active -eq 1 ]]; then
+          pids2=$(pgrep -f '^nginx: worker process' || true)
+          systemctl reload nginx >>"$LOG_PATH" 2>&1 || restored=0
+          if [[ $restored -eq 1 && -n $pids2 ]]; then
+            for ((drain = 0; drain < 30; drain++)); do
+              hung=0
+              for p in $pids2; do kill -0 "$p" 2>/dev/null && hung=1; done
+              [[ $hung -eq 1 ]] || break
+              sleep 1
+            done
+            [[ $hung -eq 0 ]] || restored=0
+          fi
+          systemctl is-active --quiet nginx || restored=0
+        fi
+      fi
+      if [[ $restored -eq 1 ]]; then
+        rm -rf -- "$quarantine"
+      else warn "Recovery incomplete; inspect $quarantine before retrying."; fi
+      die 'nginx detach failed; application files were retained.'
+    fi
+    rm -rf -- "$quarantine" || die 'Could not remove nginx quarantine.'
+  fi
+  # Logging must not recreate an unlinked installation log.
+  LOG_READY=0 LOG_PATH=/dev/null
+  if have nginx; then
+    local remaining
+    remaining=$(nginx -T 2>>"$LOG_PATH") || die 'Cannot inspect remaining nginx configuration; application files retained.'
+    for i in "${!PLAN_PATHS[@]}"; do
+      if [[ ${PLAN_TYPES[i]} == tree ]] && grep -Fq -- "${PLAN_PATHS[i]}" <<<"$remaining"; then
+        die "Application directory is still referenced by nginx: ${PLAN_PATHS[i]}. Files retained."
+      fi
+    done
+  fi
+  # Settings/journal are deliberately last so a failed tree removal is retryable.
+  for i in "${!PLAN_PATHS[@]}"; do
+    path=${PLAN_PATHS[i]} kind=${PLAN_TYPES[i]}
+    case $path in "$CONF_DIR"/*) continue ;; esac
+    [[ -e $path || -L $path ]] || continue
+    recheck_removal_record "$i"
+    case $kind in
+      tree) rm -rf --one-file-system -- "$path" || die "Partial uninstall: could not remove $path" ;;
+      empty) rmdir -- "$path" 2>/dev/null || { warn "Nonempty directory retained: $path"; failed=1; } ;;
+      *) rm -f -- "$path" || die "Partial uninstall: could not remove $path" ;;
+    esac
+  done
+  [[ $failed -eq 0 ]] || die 'Partial uninstall: inspect retained directories.'
+  for i in "${!PLAN_PATHS[@]}"; do
+    path=${PLAN_PATHS[i]}
+    case $path in "$CONF_DIR"/*) [[ ! -e $path && ! -L $path ]] || { recheck_removal_record "$i"; rm -f -- "$path"; } ;; esac
+  done
+  rm -f -- "$OWN_FILE"
+  rmdir -- "$CONF_DIR" 2>/dev/null || { [[ ! -d $CONF_DIR ]] || warn "Additional settings files retained in $CONF_DIR"; }
+  LOG_READY=0 LOG_PATH=/dev/null
+  ok 'Managed Hamgam application resources removed.'
+  report_preserved_resources
+}
+
 # ----------------------------------------------------------- arguments ----
 NON_INTERACTIVE=0
 ASSUME_YES=0
@@ -206,6 +564,10 @@ OPT_ENABLE_CSP=1
 OPT_SKIP_TLS=0
 OPT_KEEP_DEFAULT_SITE=0
 OPT_SWAP=off
+OPT_TLS_MODE=''
+OPT_TLS_CERT=''
+OPT_TLS_KEY=''
+TLS_MODE_ARG=''
 
 usage() {
   cat <<'USAGE'
@@ -236,10 +598,17 @@ Options:
                            stays after reboot. No /etc/fstab changes are made.
   --keep-default-site    leave the default nginx site alone (default: ask)
   --no-csp               do not send a Content-Security-Policy header
-  --skip-tls             no certificate, HTTP only (testing mode)
+  --tls-mode <auto|manual|off>
+                           auto: Certbot (default); manual: existing PEM files
+  --tls-cert <path>      full certificate chain (implies manual with --tls-key)
+  --tls-key <path>       unencrypted private key; never copied or deleted
+  --skip-tls             alias for --tls-mode off (HTTP testing only)
   --non-interactive      ask nothing, use only the given options
   --update               update an existing install (source and deploy only)
   --rollback             roll back to the previous release
+  --uninstall            remove only owned Hamgam resources (confirmation required)
+  --dry-run              preview --uninstall without changing resources
+  --adopt-legacy         explicitly review/adopt proven legacy installation paths
   --yes                  accept confirmation prompts
   --help                 this help
 USAGE
@@ -248,6 +617,13 @@ USAGE
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --domain|--email|--extra-hosts|--source|--git-url|--git-ref|--dist|--webroot|--repo-dir|--cf-credentials|--tls-mode|--tls-cert|--tls-key)
+        [[ $# -ge 2 && -n $2 && $2 != --* ]] || die "$1 needs a value." ;;
+    esac
+    case $1 in
+      --tls-mode) set_tls_mode "$2"; shift 2 ;;
+      --tls-cert) OPT_TLS_CERT=$2; shift 2 ;;
+      --tls-key) OPT_TLS_KEY=$2; shift 2 ;;
       --domain) OPT_DOMAIN=${2:-}; shift 2 ;;
       --email) OPT_EMAIL=${2:-}; shift 2 ;;
       --extra-hosts) OPT_EXTRA_HOSTS=${2:-}; shift 2 ;;
@@ -261,20 +637,138 @@ parse_args() {
       --swap=*) OPT_SWAP=${1#--swap=}; shift ;;
       --swap) [[ $# -ge 2 ]] || die '--swap needs off or auto.'; OPT_SWAP=$2; shift 2 ;;
       --no-csp) OPT_ENABLE_CSP=0; shift ;;
-      --skip-tls) OPT_SKIP_TLS=1; shift ;;
+      --skip-tls) set_tls_mode off; OPT_SKIP_TLS=1; shift ;;
       --keep-default-site) OPT_KEEP_DEFAULT_SITE=1; shift ;;
       --non-interactive) NON_INTERACTIVE=1; shift ;;
       --update) UPDATE_ONLY=1; shift ;;
       --rollback) ROLLBACK_ONLY=1; shift ;;
+      --uninstall) UNINSTALL_ONLY=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --adopt-legacy) ADOPT_LEGACY=1; shift ;;
       --yes | -y) ASSUME_YES=1; shift ;;
       --help | -h) usage; exit 0 ;;
       *) die "Unknown option: $1 (run with --help for usage)" ;;
     esac
   done
+  [[ $((UPDATE_ONLY + ROLLBACK_ONLY + UNINSTALL_ONLY)) -le 1 ]] || die 'Choose only one of --update, --rollback or --uninstall.'
+  [[ $DRY_RUN -eq 0 && $ADOPT_LEGACY -eq 0 || $UNINSTALL_ONLY -eq 1 ]] || die '--dry-run and --adopt-legacy require --uninstall.'
+  if [[ $UNINSTALL_ONLY -eq 1 ]]; then
+    [[ -z $OPT_DOMAIN$OPT_EMAIL$OPT_SOURCE$OPT_GIT_URL$OPT_WEBROOT$OPT_REPO_DIR$OPT_DIST$OPT_CF_CREDENTIALS$OPT_TLS_CERT$OPT_TLS_KEY$TLS_MODE_ARG && $OPT_SWAP == off ]] || die 'Install options cannot be combined with --uninstall.'
+  fi
   case $OPT_SWAP in
     off | auto) ;;
     *) die 'Invalid --swap policy; use --swap=off or --swap=auto.' ;;
   esac
+}
+
+# Manual mode references external files; ownership never transfers to Hamgam.
+set_tls_mode() {
+  case $1 in auto|manual|off) ;; *) die 'TLS mode must be auto, manual or off.' ;; esac
+  [[ -z $TLS_MODE_ARG || $TLS_MODE_ARG == "$1" ]] || die 'Conflicting TLS modes.'
+  TLS_MODE_ARG=$1
+  OPT_TLS_MODE=$1
+}
+
+resolve_tls_options() {
+  if [[ -n $OPT_TLS_CERT || -n $OPT_TLS_KEY ]]; then
+    [[ -n $OPT_TLS_CERT && -n $OPT_TLS_KEY ]] || die '--tls-cert and --tls-key must be supplied together.'
+    [[ -z $TLS_MODE_ARG || $TLS_MODE_ARG == manual ]] || die 'Manual certificate paths conflict with the TLS mode.'
+    OPT_TLS_MODE=manual
+  fi
+  OPT_TLS_MODE=${OPT_TLS_MODE:-${CFG_TLS_MODE:-auto}}
+  case $OPT_TLS_MODE in
+    manual)
+      OPT_TLS_CERT=${OPT_TLS_CERT:-${CFG_TLS_CERT:-}}
+      OPT_TLS_KEY=${OPT_TLS_KEY:-${CFG_TLS_KEY:-}}
+      OPT_SKIP_TLS=0 ;;
+    off) OPT_TLS_CERT='' OPT_TLS_KEY='' OPT_SKIP_TLS=1 ;;
+    auto) OPT_TLS_CERT='' OPT_TLS_KEY='' OPT_SKIP_TLS=0 ;;
+    *) die 'Invalid saved TLS mode.' ;;
+  esac
+  [[ $OPT_TLS_MODE != manual || -z $OPT_CF_CREDENTIALS ]] || die 'Manual TLS cannot be combined with Cloudflare issuance credentials.'
+}
+
+safe_tls_path() { [[ $1 =~ ^/[a-zA-Z0-9_./:@+\ -]+$ && $1 != *..* ]]; }
+
+trusted_certificate_path() {
+  local path=$1 private=${2:-0} resolved owner mode current
+  safe_tls_path "$path" || return 1
+  resolved=$(readlink -f -- "$path") || return 1
+  [[ -f $resolved && -r $resolved ]] || return 1
+  # Check the lexical ancestry too: a safe target behind a replaceable link is unsafe.
+  for current in "$path" "$resolved"; do
+    while :; do
+      read -r owner mode < <(stat -Lc '%u %a' -- "$current") || return 1
+      [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 1
+      if (( (8#$mode & 0022) != 0 )); then
+        # A root-owned sticky directory such as /tmp cannot replace root's entries.
+        [[ -d $current ]] && (( (8#$mode & 01000) != 0 )) || return 1
+      fi
+      [[ $current == / ]] && break
+      current=$(dirname -- "$current") || return 1
+    done
+  done
+  if [[ $private -eq 1 ]]; then
+    mode=$(stat -Lc '%a' -- "$resolved") || return 1
+    (( (8#$mode & 0077) == 0 )) || return 1
+  fi
+}
+
+validate_manual_tls() {
+  local cert=${OPT_TLS_CERT:-} key=${OPT_TLS_KEY:-} path resolved root cert_pub key_pub hosts h chain line issuer='' subject=''
+  have openssl || die 'OpenSSL is required to validate manual TLS.'
+  for path in "$cert" "$key"; do
+    safe_tls_path "$path" || die 'Certificate paths must be absolute and contain no configuration metacharacters.'
+    [[ -f $path && -r $path ]] || die "Cannot read TLS file: $path"
+    resolved=$(readlink -f -- "$path") || die 'Cannot resolve a TLS file.'
+    for root in "${OPT_WEBROOT:-/var/www/hamgam}" "${OPT_REPO_DIR:-/opt/hamgam}" "$CONF_DIR"; do
+      root=$(readlink -m -- "$root") || die 'Cannot resolve an application directory.'
+      [[ $resolved != "$root" && $resolved != "$root/"* ]] || die 'Keep manual TLS files outside Hamgam application/configuration directories.'
+    done
+  done
+  trusted_certificate_path "$cert" || die 'Unsafe certificate ownership or permissions; use root-owned files and protected parent directories.'
+  trusted_certificate_path "$key" 1 || die 'Unsafe private-key permissions; require root ownership and mode 600 (or 400) with protected parents.'
+  openssl x509 -in "$cert" -noout >/dev/null 2>&1 || die 'The certificate is not valid PEM.'
+  openssl pkey -in "$key" -passin pass: -noout >/dev/null 2>&1 || die 'The private key is invalid or encrypted; an unattended unencrypted PEM key is required.'
+  cert_pub=$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256) || die 'Could not read certificate public key.'
+  key_pub=$(openssl pkey -in "$key" -passin pass: -pubout -outform DER 2>/dev/null | openssl dgst -sha256) || die 'Could not read private-key public key.'
+  [[ $cert_pub == "$key_pub" ]] || die 'The certificate and private key do not match.'
+  chain=$(openssl crl2pkcs7 -nocrl -certfile "$cert" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null) || die 'Malformed certificate chain.'
+  while IFS= read -r line; do
+    case $line in
+      subject=*)
+        subject=${line#subject=}
+        [[ -z $issuer || $issuer == "$subject" ]] || die 'The fullchain certificates are not in leaf-to-root order.' ;;
+      issuer=*) issuer=${line#issuer=} ;;
+    esac
+  done <<<"$chain"
+  hosts="${OPT_DOMAIN} ${OPT_EXTRA_HOSTS//,/ }"
+  # Browsers ignore the legacy CN and require the name in a DNS SAN. OpenSSL
+  # still falls back to CN, so the hostname check alone would accept a
+  # certificate that every browser rejects.
+  local san_names san_host covered
+  san_names=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' \n') || die 'Could not read the certificate subjectAltName.'
+  [[ -n $san_names ]] || die 'The certificate has no subjectAltName; browsers reject CN-only certificates.'
+  for h in $hosts; do
+    covered=0
+    for san_host in ${san_names//,/ }; do
+      [[ $san_host == "DNS:$h" ]] && covered=1
+      # A wildcard covers exactly one label.
+      if [[ $san_host == 'DNS:*.'* ]]; then
+        san_host=${san_host#DNS:*.}
+        [[ $h == *".$san_host" && ${h%.*} != *.* ]] && covered=1
+      fi
+    done
+    [[ $covered -eq 1 ]] || die "The certificate subjectAltName does not include $h. Browsers will reject it."
+  done
+  local ca_args=()
+  [[ -z ${SSL_CERT_FILE:-} ]] || ca_args=(-CAfile "$SSL_CERT_FILE")
+  for h in $hosts; do
+    [[ $h =~ $VALID_DOMAIN_RE ]] || die "Invalid TLS host: $h"
+    openssl verify "${ca_args[@]}" -purpose sslserver -verify_hostname "$h" -untrusted "$cert" "$cert" >/dev/null 2>&1 ||
+      die "Certificate trust, validity dates, server-auth usage or domain coverage failed for $h. Use a trusted fullchain; verification is never disabled."
+  done
+  ok 'Manual TLS certificate, chain, domains and private key validated'
 }
 
 # ------------------------------------------------------------- helpers ----
@@ -735,7 +1229,8 @@ load_saved_conf() {
   # silently leave a stale value behind instead of failing loudly.
   # shellcheck disable=SC2034
   CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
-  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP=''
+  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP='' CFG_DIST=''
+  CFG_TLS_MODE='' CFG_TLS_CERT='' CFG_TLS_KEY=''
   # shellcheck disable=SC1090
   . "$CONF_FILE" || return 1
   return 0
@@ -770,6 +1265,7 @@ collect_config() {
     OPT_GIT_REF=${OPT_GIT_REF:-$CFG_GIT_REF}
     OPT_WEBROOT=${OPT_WEBROOT:-$CFG_WEBROOT}
     OPT_REPO_DIR=${OPT_REPO_DIR:-$CFG_REPO_DIR}
+    OPT_DIST=${OPT_DIST:-${CFG_DIST:-}}
     OPT_EXTRA_HOSTS=${OPT_EXTRA_HOSTS:-${CFG_EXTRA_HOSTS:-}}
     # If --no-csp was not given and CSP was already off, it stays off.
     if [[ $OPT_ENABLE_CSP -eq 1 && ${CFG_ENABLE_CSP:-1} -eq 0 ]]; then
@@ -778,7 +1274,15 @@ collect_config() {
     if [[ -z ${OPT_DOMAIN:-} ]]; then
       die "The saved settings are incomplete ($CONF_FILE). Run a fresh install."
     fi
+    resolve_tls_options
     guard_webroot "$OPT_WEBROOT"
+    # A settings file from an older version may name a source mode it cannot
+    # repeat: refuse here with the missing value instead of failing later
+    # inside readlink with no useful message.
+    if [[ $OPT_SOURCE == prebuilt && -z ${OPT_DIST:-} ]]; then
+      die 'This install used a prebuilt directory, but its path was not saved. Re-run with --dist <path>.'
+    fi
+    if [[ $ROLLBACK_ONLY -eq 0 && $OPT_TLS_MODE == manual ]]; then validate_manual_tls; fi
     return 0
   fi
 
@@ -800,17 +1304,25 @@ collect_config() {
   OPT_WEBROOT=${OPT_WEBROOT:-/var/www/hamgam}
   OPT_REPO_DIR=${OPT_REPO_DIR:-/opt/hamgam}
 
+  resolve_tls_options
   if [[ $NON_INTERACTIVE -eq 1 ]]; then
-    if [[ -z $OPT_DOMAIN || -z $OPT_EMAIL ]]; then
-      die '--domain and --email are required in non-interactive mode.'
-    fi
+    [[ -n $OPT_DOMAIN ]] || die '--domain is required in non-interactive mode.'
+    if [[ $OPT_TLS_MODE == auto && -z $OPT_EMAIL ]]; then die '--email is required for automatic TLS.'; fi
   else
     plain ''
     plain "  ${C_DIM}A few values are needed. Press Enter to accept any default.${C_RESET}"
     ask_value OPT_DOMAIN 'Site domain (without https)' "$OPT_DOMAIN" "$VALID_DOMAIN_RE" \
       'Not a valid domain. Example: fit.example.com'
-    ask_value OPT_EMAIL 'Email for the SSL certificate' "$OPT_EMAIL" "$VALID_EMAIL_RE" \
-      'Not a valid email. Example: me@example.com'
+    ask_value OPT_TLS_MODE 'Certificate mode (auto/manual/off)' "$OPT_TLS_MODE" '^(auto|manual|off)$' 'Enter auto, manual or off.'
+    if [[ $OPT_TLS_MODE == manual ]]; then
+      ask_value OPT_TLS_CERT 'Full certificate chain PEM path' "$OPT_TLS_CERT" '' ''
+      ask_value OPT_TLS_KEY 'Unencrypted private key PEM path' "$OPT_TLS_KEY" '' ''
+    elif [[ $OPT_TLS_MODE == auto ]]; then
+      ask_value OPT_EMAIL 'Email for the SSL certificate' "$OPT_EMAIL" "$VALID_EMAIL_RE" 'Not a valid email.'
+    fi
+    # Interactive selection wins over previously saved values.
+    if [[ $OPT_TLS_MODE != manual ]]; then OPT_TLS_CERT='' OPT_TLS_KEY=''; fi
+    resolve_tls_options
     ask_value OPT_WEBROOT 'Directory that holds the releases' "$OPT_WEBROOT" '' ''
     ask_value OPT_SOURCE 'Source mode (git/local/prebuilt)' "$OPT_SOURCE" '^(git|local|prebuilt)$' \
       'Enter one of git, local or prebuilt.'
@@ -826,7 +1338,7 @@ collect_config() {
 
   # Final validation, regardless of where each value came from.
   [[ $OPT_DOMAIN =~ $VALID_DOMAIN_RE ]] || die "Invalid domain: $OPT_DOMAIN"
-  [[ $OPT_EMAIL =~ $VALID_EMAIL_RE ]] || die "Invalid email: $OPT_EMAIL"
+  if [[ $OPT_TLS_MODE == auto ]]; then [[ $OPT_EMAIL =~ $VALID_EMAIL_RE ]] || die "Invalid email: $OPT_EMAIL"; fi
   guard_webroot "$OPT_WEBROOT"
   valid_path "$OPT_REPO_DIR" || die "Invalid clone path: $OPT_REPO_DIR"
   validate_extra_hosts
@@ -849,13 +1361,21 @@ collect_config() {
     die "Could not read the Cloudflare credentials: $OPT_CF_CREDENTIALS"
   fi
 
+  if [[ $OPT_TLS_MODE == manual ]]; then validate_manual_tls; fi
+
   # Summary and confirmation
   if [[ $NON_INTERACTIVE -eq 0 ]]; then
     ui_out ''
     hr
     plain "  ${C_BOLD}Install summary${C_RESET}"
     plain "    Site domain      ${C_BOLD}$OPT_DOMAIN${C_RESET}"
-    plain "    Certificate mail $OPT_EMAIL"
+    plain "    TLS mode         $OPT_TLS_MODE"
+    if [[ $OPT_TLS_MODE == manual ]]; then
+      plain "    Certificate      $OPT_TLS_CERT"
+      plain "    Private key      $OPT_TLS_KEY"
+    else
+      plain "    Certificate mail $OPT_EMAIL"
+    fi
     plain "    Source mode      $OPT_SOURCE"
     if [[ $OPT_SOURCE == git ]]; then
       plain "    Repository       $OPT_GIT_URL ($OPT_GIT_REF)"
@@ -874,18 +1394,21 @@ collect_config() {
 save_config() {
   mkdir -p "$CONF_DIR"
   chmod 700 "$CONF_DIR"
-  cat >"$CONF_FILE" <<EOF
-# Hamgam install settings; written by deploy/install.sh.
-CFG_DOMAIN='${OPT_DOMAIN}'
-CFG_EMAIL='${OPT_EMAIL}'
-CFG_SOURCE='${OPT_SOURCE}'
-CFG_GIT_URL='${OPT_GIT_URL}'
-CFG_GIT_REF='${OPT_GIT_REF}'
-CFG_WEBROOT='${OPT_WEBROOT}'
-CFG_REPO_DIR='${OPT_REPO_DIR}'
-CFG_EXTRA_HOSTS='${OPT_EXTRA_HOSTS}'
-CFG_ENABLE_CSP='${OPT_ENABLE_CSP}'
-EOF
+  local tmp name value
+  tmp=$(mktemp "$CONF_DIR/.install.conf.XXXXXX") || die 'Cannot stage install settings.'
+  chmod 600 "$tmp"
+  printf '# Hamgam install settings; written by deploy/install.sh.\n' >"$tmp"
+  for name in DOMAIN EMAIL SOURCE GIT_URL GIT_REF WEBROOT REPO_DIR DIST EXTRA_HOSTS ENABLE_CSP TLS_MODE TLS_CERT TLS_KEY; do
+    value="OPT_$name"
+    printf 'CFG_%s=%q\n' "$name" "${!value}" >>"$tmp"
+  done
+  mv -f -- "$tmp" "$CONF_FILE"
+  record_if_installing file "$CONF_FILE"
+  record_nginx_resources
+  local site_log
+  for site_log in /var/log/nginx/hamgam.access.log /var/log/nginx/hamgam.error.log; do
+    if [[ -f $site_log ]]; then record_if_installing log "$site_log"; fi
+  done
   chmod 600 "$CONF_FILE"
   ok "Settings saved: $CONF_FILE"
   return 0
@@ -915,7 +1438,7 @@ install_packages() {
   # Check once more after installing, in case nginx came from snap.
   detect_foreign_nginx
 
-  if [[ $OPT_SKIP_TLS -eq 0 ]]; then
+  if [[ ${OPT_TLS_MODE:-auto} == auto ]]; then
     if ! dpkg -s python3-certbot-nginx >/dev/null 2>&1; then
       note 'Installing certbot for a free SSL certificate...'
       if ! apt_install python3-certbot-nginx; then
@@ -1084,10 +1607,11 @@ fetch_git() {
     git -C "$dir" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
   else
     note "Cloning into $dir"
-    rm -rf "$dir"
+    [[ ! -e $dir && ! -L $dir ]] || die 'Clone destination already exists and is not a repository; refusing to overwrite it.'
     mkdir -p "$(dirname "$dir")"
     run_logged git clone --depth 1 --branch "$OPT_GIT_REF" "$OPT_GIT_URL" "$dir" ||
       die "Clone failed. Check access to $OPT_GIT_URL."
+    record_if_installing tree "$dir"
   fi
   BUILD_ID=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || printf 'nogit')
   ok "Source ready: $BUILD_ID"
@@ -1334,7 +1858,10 @@ deploy_files() {
   have rsync || die 'rsync is not installed.'
   init_paths
   guard_webroot "$SITE_ROOT"
+  local new_root=0
+  [[ -e $SITE_ROOT ]] || new_root=1
   mkdir -p "$RELEASES_DIR"
+  if [[ $new_root -eq 1 ]]; then record_if_installing tree "$SITE_ROOT"; fi
 
   local stamp release
   stamp=$(date +%Y%m%d-%H%M%S)
@@ -1350,6 +1877,7 @@ deploy_files() {
 
   note "Building the new release in $release"
   mkdir -p "$release"
+  record_if_installing tree "$release"
   if ! run_logged rsync -a --chmod=D755,F644 "$BUILD_DIR/" "$release/"; then
     rm -rf "$release"
     die 'Copying files into the new release failed.'
@@ -1374,6 +1902,8 @@ deploy_files() {
     SWAP_DONE=0
     die 'The atomic release swap failed.'
   }
+  record_if_installing link "$CURRENT_LINK"
+  if [[ -f $PREVIOUS_MARK ]]; then record_if_installing file "$PREVIOUS_MARK"; fi
   NEED_NGINX_RELOAD=1
   ok "New release is live: $(basename "$release")"
 
@@ -1469,20 +1999,34 @@ site_config_matches_domain() {
   [[ -f $NGINX_SITE ]] && grep -qE "^[[:space:]]*server_name[[:space:]].*\b${OPT_DOMAIN//./\\.}\b" "$NGINX_SITE"
 }
 
-write_site_config() {
+render_site_config() {
   local server_names
   server_names=$(build_server_names)
-  if write_if_changed "$NGINX_SITE" <<EOF
-# Generated by deploy/install.sh. For durable changes do not edit this file
-# directly; re-run the script.
-#
-# Security headers and the cache policy are set at server level, and no
-# location defines its own add_header, so header inheritance is not broken.
+  printf '# Generated by deploy/install.sh; managed Hamgam site.\n'
+  if [[ $OPT_TLS_MODE == manual ]]; then
+    cat <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name $server_names;
-
+    return 301 https://$OPT_DOMAIN\$request_uri;
+}
+EOF
+  fi
+  printf 'server {\n'
+  if [[ $OPT_TLS_MODE == manual ]]; then
+    cat <<EOF
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    ssl_certificate "$OPT_TLS_CERT";
+    ssl_certificate_key "$OPT_TLS_KEY";
+    ssl_protocols TLSv1.2 TLSv1.3;
+EOF
+  else
+    printf '    listen 80;\n    listen [::]:80;\n'
+  fi
+  cat <<EOF
+    server_name $server_names;
     root $CURRENT_LINK;
     index index.html;
 
@@ -1524,11 +2068,89 @@ server {
     error_log /var/log/nginx/hamgam.error.log warn;
 }
 EOF
-  then
-    return 0
-  fi
-  return 1
 }
+
+write_site_config() {
+  local content status=0
+  content=$(render_site_config) || die 'Could not render nginx configuration.'
+  write_if_changed "$NGINX_SITE" <<<"$content" || status=$?
+  [[ $status -le 1 ]] || die 'Could not write the nginx site.'
+  return "$status"
+}
+
+# Configuration activation is independent from the release symlink transaction.
+# On failure the previous config must be back on disk before the caller rolls back.
+activate_site_config() (
+  local backup status=0 p original_active=0
+  local paths=("$NGINX_SITE" "$NGINX_LINK" "$HEADERS_SNIPPET" "$CACHE_MAP")
+  backup=$(mktemp -d /tmp/hamgam-nginx.XXXXXXXX) || die 'Cannot stage nginx recovery files.'
+  chmod 700 "$backup"
+  for p in "${paths[@]}"; do
+    if [[ -e $p || -L $p ]]; then
+      mkdir -p "$backup$(dirname "$p")" || die 'Cannot stage nginx recovery.'
+      cp -a -- "$p" "$backup$p" || die 'Cannot copy nginx recovery files.'
+    fi
+  done
+  # shellcheck disable=SC2317  # called via EXIT trap in this transaction
+  recover_nginx_config() {
+    local result=$? failed=0
+    trap - EXIT
+    if [[ $result -ne 0 ]]; then
+      for p in "${paths[@]}"; do
+        rm -f -- "$p" || failed=1
+        if [[ -e $backup$p || -L $backup$p ]]; then cp -a -- "$backup$p" "$p" || failed=1; fi
+      done
+      if [[ $original_active -eq 1 ]]; then
+        nginx -t >>"$LOG_PATH" 2>&1 && systemctl reload nginx >>"$LOG_PATH" 2>&1 || failed=1
+      fi
+      if [[ $failed -ne 0 ]]; then
+        warn "nginx recovery needs manual attention; files retained at $backup"
+        exit "$result"
+      fi
+      warn 'Previous nginx configuration restored.'
+    fi
+    rm -rf -- "$backup"
+    exit "$result"
+  }
+  trap recover_nginx_config EXIT
+  systemctl is-active --quiet nginx && original_active=1
+  write_headers_snippet
+  write_cache_map
+  if [[ $OPT_TLS_MODE != auto ]] || ! site_config_has_certbot || ! site_config_matches_domain; then
+    write_site_config || status=$?
+    [[ $status -le 1 ]] || die 'Could not stage the nginx site.'
+  fi
+  if [[ -L $NGINX_LINK ]]; then
+    [[ $(readlink -f "$NGINX_LINK") == "$NGINX_SITE" ]] || die 'The Hamgam nginx link points at an unrelated file.'
+  elif [[ -e $NGINX_LINK ]]; then
+    die 'An unrelated file occupies the Hamgam nginx enabled-site path.'
+  else
+    ln -s "$NGINX_SITE" "$NGINX_LINK" || die 'Could not enable the nginx site.'
+  fi
+  nginx -t >>"$LOG_PATH" 2>&1 || die 'The new nginx configuration is invalid.'
+  # reload returns 0 even when the master cannot bind a listener and keeps the
+  # old configuration, so the exit status alone cannot prove the new file is
+  # live. Old workers exiting is the observable evidence that it is.
+  local old_workers='' worker_hung=0 w
+  old_workers=$(pgrep -f '^nginx: worker process' || true)
+  if [[ $original_active -eq 1 ]]; then
+    systemctl reload nginx >>"$LOG_PATH" 2>&1 || die 'Reloading nginx failed.'
+    if [[ -n $old_workers ]]; then
+      for ((w = 0; w < 30; w++)); do
+        worker_hung=0
+        for pid in $old_workers; do kill -0 "$pid" 2>/dev/null && worker_hung=1; done
+        [[ $worker_hung -eq 1 ]] || break
+        sleep 1
+      done
+      [[ $worker_hung -eq 0 ]] || die 'nginx accepted the reload command but kept the previous workers; the new configuration is not live.'
+    fi
+  else
+    systemctl start nginx >>"$LOG_PATH" 2>&1 || die 'Starting nginx failed.'
+  fi
+  systemctl is-active --quiet nginx || die 'nginx is not active after activation.'
+  log "nginx activated; release reload requested=$NEED_NGINX_RELOAD"
+  ok 'nginx configuration validated and activated'
+)
 
 handle_default_site() {
   [[ -e /etc/nginx/sites-enabled/default ]] || return 0
@@ -1579,47 +2201,13 @@ configure_nginx() {
   step 'Configuring nginx'
   init_paths
 
-  write_headers_snippet
-  write_cache_map
-
   resolve_domain_conflicts
-
-  local changed=0
-  if site_config_has_certbot && site_config_matches_domain; then
-    # certbot has rewritten this file for HTTPS. It is not replaced with the
-    # HTTP template, or the certificate would stop being used.
-    ok 'The current config is managed by certbot; leaving it alone'
-  else
-    if write_site_config; then
-      changed=1
-    fi
-  fi
-
-  if [[ ! -e $NGINX_LINK ]]; then
-    ln -s "$NGINX_SITE" "$NGINX_LINK"
-    changed=1
-  fi
-
   handle_default_site
-
-  # The config must validate before any reload.
-  if ! nginx -t >/dev/null 2>>"$LOG_PATH"; then
-    bad 'The nginx config is not valid:'
-    nginx -t 2>&1 | while IFS= read -r line; do note "$line"; done
-    die 'Stopped; nginx was not reloaded and the previous config is still active.'
-  fi
-  ok 'nginx config validated'
-
-  if [[ $changed -eq 1 || $NEED_NGINX_RELOAD -eq 1 ]]; then
-    run_logged systemctl reload nginx || run_logged systemctl restart nginx ||
-      die 'Reloading nginx failed.'
-    ok 'nginx reloaded'
-  else
-    ok 'The nginx config was unchanged'
-  fi
-
+  local status=0
+  activate_site_config || { status=$?; stop_install "$status"; }
+  record_nginx_resources
+  NEED_NGINX_RELOAD=0
   run_logged systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl is-active --quiet nginx || die 'The nginx service is not active.'
   ok 'nginx is active and enabled at boot'
   return 0
 }
@@ -1723,6 +2311,12 @@ tls_troubleshooting() {
 
 setup_tls() {
   step 'Installing the SSL certificate'
+
+  if [[ $OPT_TLS_MODE == manual ]]; then
+    TLS_STATE=manual
+    note 'Using external TLS files; renewal and nginx reload are your responsibility.'
+    return 0
+  fi
 
   if [[ $OPT_SKIP_TLS -eq 1 ]]; then
     warn 'No certificate installed, as requested (--skip-tls). The site stays on HTTP.'
@@ -1965,7 +2559,9 @@ health_check() {
       fi
 
       local expiry days
-      expiry=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$OPT_DOMAIN/cert.pem" 2>/dev/null |
+      local expiry_file="/etc/letsencrypt/live/$OPT_DOMAIN/cert.pem"
+      if [[ $OPT_TLS_MODE == manual ]]; then expiry_file=$OPT_TLS_CERT; fi
+      expiry=$(openssl x509 -enddate -noout -in "$expiry_file" 2>/dev/null |
         cut -d= -f2 || true)
       if [[ -n $expiry ]]; then
         days=$((($(date -d "$expiry" +%s) - $(date +%s)) / 86400))
@@ -1998,6 +2594,7 @@ summary() {
   local tls_note=''
   case $TLS_STATE in
     skipped) tls_note='No certificate was installed, as requested (--skip-tls).' ;;
+    manual) tls_note='External TLS files are in use; arrange renewal and reload nginx after replacement.' ;;
     missing) tls_note='certbot was not installed, so no certificate could be issued.' ;;
     declined) tls_note='You declined the certificate install.' ;;
     failed) tls_note='The attempt to issue a certificate failed.' ;;
@@ -2044,8 +2641,13 @@ summary() {
   plain "  ${C_BOLD}Next steps${C_RESET}"
   note "Update:   sudo bash $0 --update"
   note "Rollback: sudo bash $0 --rollback"
+  note "Remove:   sudo bash $0 --uninstall"
   if [[ $OPT_SKIP_TLS -eq 1 || $tls_ok -eq 0 ]]; then
-    note "Get a certificate: sudo certbot --nginx -d $OPT_DOMAIN"
+    if [[ $OPT_TLS_MODE == manual ]]; then
+      note 'Check the supplied certificate/key and fullchain trust, then reload nginx.'
+    else
+      note "Get a certificate: sudo certbot --nginx -d $OPT_DOMAIN"
+    fi
   fi
   note 'Final test: open the site, then cut the network and reload.'
   ui_out ''
@@ -2088,6 +2690,12 @@ main() {
   # Keep diagnostics from system tools in English, regardless of SSH locale.
   export LC_ALL=C
   parse_args "$@"
+  if [[ $UNINSTALL_ONLY -eq 1 ]]; then
+    need_root "$@"
+    acquire_lock
+    run_uninstall
+    return
+  fi
   init_log "$@"
   need_root "$@"
   acquire_lock
@@ -2102,7 +2710,9 @@ main() {
 
   preflight
   collect_config
-  save_config
+  inventory_begin
+  record_if_installing log "$LOG_FILE"
+  # Keep last-good TLS settings until activation has succeeded.
 
   # The summary returns non-zero when health checks failed. That is an outcome
   # to report, not an abort, so it must not reach the error trap: the release
@@ -2118,6 +2728,8 @@ main() {
     fetch_and_build
     deploy_files
     configure_nginx
+    setup_tls
+    save_config
     health_check
     summary || outcome=$?
   else
@@ -2127,6 +2739,7 @@ main() {
     configure_nginx
     configure_firewall
     setup_tls
+    save_config
     health_check
     summary || outcome=$?
   fi

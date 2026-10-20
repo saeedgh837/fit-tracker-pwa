@@ -48,12 +48,15 @@ jobs:
         run: |
           bash deploy/install.test.sh
           bash deploy/memory.test.sh
+          sudo bash deploy/tls.test.sh
+          sudo bash deploy/uninstall.test.sh
 
       - name: Shellcheck
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -s bash deploy/install.sh deploy/install.test.sh deploy/memory.test.sh
+          shellcheck -s bash deploy/install.sh deploy/install.test.sh deploy/memory.test.sh \
+            deploy/tls.test.sh deploy/uninstall.test.sh deploy/test-fixtures.sh
 
       - name: Install (HTTP only, real apt + nginx)
         run: |
@@ -112,6 +115,74 @@ jobs:
           sleep 2
           curl -sS -o /dev/null -w 'after restart: HTTP %{http_code}\n' \
             --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/
+
+      # Manual TLS and removal are proven against real nginx. The CA is generated
+      # on the runner and trusted only there; nothing here reaches Let's Encrypt.
+      - name: Manual TLS and uninstall
+        run: |
+          set -e
+          sudo install -d -o root -g root -m 700 /etc/ssl/hamgam
+          # Stay in the repository root: --source local reads package.json from PWD.
+          sudo bash -c '
+            cd /tmp
+            openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem \
+              -days 2 -subj /CN=Hamgam-CI-CA >/dev/null 2>&1
+            printf "subjectAltName=DNS:hamgam.test,DNS:www.hamgam.test\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n" > ext
+            openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out privkey.pem >/dev/null 2>&1
+            openssl req -new -key privkey.pem -out leaf.csr -subj /CN=hamgam.test >/dev/null 2>&1
+            openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+              -out leaf.pem -days 1 -extfile ext >/dev/null 2>&1
+            cat leaf.pem ca.pem > fullchain.pem
+          '
+          sudo install -o root -g root -m 644 /tmp/fullchain.pem /etc/ssl/hamgam/fullchain.pem
+          sudo install -o root -g root -m 600 /tmp/privkey.pem /etc/ssl/hamgam/privkey.pem
+          sudo install -m 644 /tmp/ca.pem /usr/local/share/ca-certificates/hamgam-ci-ca.crt
+          sudo update-ca-certificates >/dev/null
+          # A site on another port that Hamgam does not own.
+          sudo mkdir -p /srv/witness
+          printf 'witness-alive\n' | sudo tee /srv/witness/index.html >/dev/null
+          printf 'server {\n  listen 8080;\n  server_name witness.test;\n  root /srv/witness;\n}\n' |
+            sudo tee /etc/nginx/sites-available/witness >/dev/null
+          sudo ln -sf /etc/nginx/sites-available/witness /etc/nginx/sites-enabled/witness
+          sudo nginx -t && sudo systemctl reload nginx
+
+          echo "=== switch the existing install to manual TLS ==="
+          # The short-lived test certificate trips the expiry warning, so status 1
+          # is expected here; anything else is a real failure.
+          rc=0
+          sudo bash deploy/install.sh --update --non-interactive --yes \
+            --tls-mode manual \
+            --tls-cert /etc/ssl/hamgam/fullchain.pem \
+            --tls-key /etc/ssl/hamgam/privkey.pem || rc=$?
+          test "$rc" -le 1 || { echo "installer exited with $rc"; exit 1; }
+          echo "HTTP must redirect: $(curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}' \
+            --resolve hamgam.test:80:127.0.0.1 http://hamgam.test/)"
+          test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve hamgam.test:443:127.0.0.1 https://hamgam.test/)" = 200
+          # No -k: the chain has to verify against the trusted test CA.
+          test "$(curl -sS -o /dev/null -w '%{ssl_verify_result}' --resolve hamgam.test:443:127.0.0.1 https://hamgam.test/)" = 0
+          curl -sS --resolve hamgam.test:443:127.0.0.1 https://hamgam.test/ | grep -q 'id="root"'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' --resolve www.hamgam.test:443:127.0.0.1 https://www.hamgam.test/)" = 200
+
+          echo "=== dry run changes nothing ==="
+          sudo bash deploy/install.sh --uninstall --dry-run --non-interactive
+          test -L /var/www/hamgam/current
+
+          echo "=== uninstall ==="
+          fstab_before=$(sha256sum /etc/fstab)
+          cert_before=$(sudo sha256sum /etc/ssl/hamgam/fullchain.pem /etc/ssl/hamgam/privkey.pem)
+          sudo bash deploy/install.sh --uninstall --non-interactive --yes
+          test ! -e /var/www/hamgam
+          test ! -e /etc/nginx/sites-available/hamgam
+          test ! -e /etc/nginx/sites-enabled/hamgam
+          test ! -e /etc/hamgam
+          test "$(systemctl is-active nginx)" = active
+          test "$(curl -sS --resolve witness.test:8080:127.0.0.1 http://witness.test:8080/)" = witness-alive
+          test "$(sudo sha256sum /etc/ssl/hamgam/fullchain.pem /etc/ssl/hamgam/privkey.pem)" = "$cert_before"
+          test "$(sha256sum /etc/fstab)" = "$fstab_before"
+          echo "uninstall kept the witness, the certificate and fstab"
+          # Running it again must be harmless.
+          sudo bash deploy/install.sh --uninstall --non-interactive --yes
+          test "$(systemctl is-active nginx)" = active
 
       - name: Show installer log
         if: always()

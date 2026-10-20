@@ -315,7 +315,7 @@ load_saved_conf() {
   [[ -r $CONF_FILE_TEST ]] || return 1
   CFG_DOMAIN='' CFG_EMAIL='' CFG_SOURCE='' CFG_GIT_URL='' CFG_GIT_REF=''
   # shellcheck disable=SC2034
-  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP=''
+  CFG_WEBROOT='' CFG_REPO_DIR='' CFG_EXTRA_HOSTS='' CFG_ENABLE_CSP='' CFG_DIST=''
   # shellcheck disable=SC1090
   . "$CONF_FILE_TEST" || return 1
   return 0
@@ -334,12 +334,50 @@ t 'update: OPT_WEBROOT restored' '/var/www/hamgam' "${OPT_WEBROOT:-}"
 t 'update: OPT_REPO_DIR restored' '/opt/hamgam' "${OPT_REPO_DIR:-}"
 t 'update: OPT_EXTRA_HOSTS restored' 'www.example.com' "${OPT_EXTRA_HOSTS:-}"
 
-# An explicit command-line value must win over the saved one.
-OPT_SOURCE='prebuilt' OPT_GIT_REF='v2'
+# An explicit command-line value must win over the saved one. A prebuilt source
+# also needs its directory, exactly as a real operator would have to supply it.
+mkdir -p "$TMP/prebuilt-dist"
+OPT_SOURCE='prebuilt' OPT_DIST="$TMP/prebuilt-dist" OPT_GIT_REF='v2'
 UPDATE_ONLY=1
 collect_config >/dev/null 2>&1
 t 'update: CLI --source wins over saved' 'prebuilt' "${OPT_SOURCE:-}"
 t 'update: CLI --git-ref wins over saved' 'v2' "${OPT_GIT_REF:-}"
+OPT_DIST=''
+
+# Real bug: a prebuilt install records the source mode but not the dist path,
+# so --update found no build output and died at readlink on an empty value.
+mkdir -p "$TMP/prebuilt-dist"
+cat >"$CONF_FILE_TEST" <<EOF
+CFG_DOMAIN='fit.example.com'
+CFG_SOURCE='prebuilt'
+CFG_DIST='$TMP/prebuilt-dist'
+CFG_WEBROOT='/var/www/hamgam'
+CFG_REPO_DIR='/opt/hamgam'
+CFG_ENABLE_CSP='1'
+EOF
+OPT_DOMAIN='' OPT_SOURCE='' OPT_DIST='' OPT_WEBROOT='' OPT_REPO_DIR='' OPT_EXTRA_HOSTS=''
+UPDATE_ONLY=1
+collect_config >/dev/null 2>&1
+t 'update: prebuilt dist path restored' "$TMP/prebuilt-dist" "${OPT_DIST:-}"
+OPT_DIST='' OPT_SOURCE=''
+UPDATE_ONLY=0
+
+# A settings file written by an older version has no dist path at all. The
+# update must name the missing value instead of failing inside readlink.
+cat >"$CONF_FILE_TEST" <<'EOF'
+CFG_DOMAIN='fit.example.com'
+CFG_SOURCE='prebuilt'
+CFG_WEBROOT='/var/www/hamgam'
+CFG_REPO_DIR='/opt/hamgam'
+CFG_ENABLE_CSP='1'
+EOF
+OPT_DOMAIN='' OPT_SOURCE='' OPT_DIST='' OPT_WEBROOT='' OPT_REPO_DIR='' OPT_EXTRA_HOSTS=''
+UPDATE_ONLY=1
+update_out=$(collect_config 2>&1)
+t 'update: missing prebuilt dist is refused' '1' "$?"
+t 'update: missing prebuilt dist names the cause' yes "$([[ $update_out == *'dist'* && $update_out == *'--dist'* ]] && printf yes || printf no)"
+OPT_DIST='' OPT_SOURCE=''
+UPDATE_ONLY=0
 
 # An incomplete settings file must fail loudly, not crash obscurely.
 cat >"$CONF_FILE_TEST" <<'EOF'

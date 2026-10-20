@@ -400,6 +400,7 @@ banner() { :; }
 preflight() { :; }
 collect_config() { :; }
 save_config() { :; }
+inventory_begin() { :; }
 install_packages() { :; }
 fetch_and_build() { :; }
 deploy_files() { :; }
